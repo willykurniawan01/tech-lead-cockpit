@@ -274,7 +274,7 @@
       <dl>
         <dt>Base URL</dt><dd class="mono">{jiraStatus.baseUrl ?? '—'}</dd>
         <dt>Tipe</dt><dd>{jiraStatus.flavor === 'cloud' ? 'Cloud' : jiraStatus.flavor === 'datacenter' ? 'Data Center / Server' : '—'}</dd>
-        <dt>Auth</dt><dd>{jiraStatus.auth === 'basic' ? `Email (${jiraStatus.email ?? '—'}) + API token` : 'Personal Access Token'}</dd>
+        <dt>Auth</dt><dd>{!jiraStatus.baseUrl ? '—' : jiraStatus.auth === 'basic' ? `Email (${jiraStatus.email ?? '—'}) + API token` : 'Personal Access Token'}</dd>
         <dt>Token di Keychain</dt><dd>{jiraStatus.tokenPresent ? 'Ada (tech-lead-cockpit.jira)' : 'Belum ada'}</dd>
         {#if jiraStatus.user}
           <dt>Login sebagai</dt>
@@ -344,7 +344,7 @@
       <dl>
         <dt>Base URL</dt><dd class="mono">{status.baseUrl ?? '—'}</dd>
         <dt>Tipe</dt><dd>{status.flavor === 'cloud' ? 'Cloud' : status.flavor === 'datacenter' ? 'Data Center / Server' : '—'}</dd>
-        <dt>Auth</dt><dd>{status.auth === 'basic' ? 'Email + API token' : status.auth === 'bearer' ? 'Personal Access Token' : '—'}</dd>
+        <dt>Auth</dt><dd>{!status.baseUrl ? '—' : status.auth === 'basic' ? 'Email + API token' : status.auth === 'bearer' ? 'Personal Access Token' : '—'}</dd>
         <dt>Token di Keychain</dt><dd>{status.tokenPresent ? 'Ada (tech-lead-cockpit.confluence)' : 'Belum ada'}</dd>
         {#if status.user}<dt>Login sebagai</dt><dd><strong>{status.user}</strong></dd>{/if}
       </dl>

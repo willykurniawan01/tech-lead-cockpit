@@ -73,6 +73,11 @@ export function validateSettings(raw: Partial<AppSettings>): AppSettings {
 }
 
 /** Settings from an install configured through .env.local (before the wizard existed). */
+function authFrom(auth: string, baseUrl: string): 'basic' | 'bearer' {
+  if (auth === 'basic' || auth === 'bearer') return auth;
+  return baseUrl && !/\.atlassian\.net/i.test(baseUrl) ? 'bearer' : 'basic';
+}
+
 export function settingsFromEnv(env: Env): AppSettings {
   const v = (k: string) => env[k]?.trim() || '';
   const safeUrl = (k: string) => {
@@ -83,8 +88,9 @@ export function settingsFromEnv(env: Env): AppSettings {
     }
   };
   return validateSettings({
-    confluence: { baseUrl: safeUrl('CONFLUENCE_BASE_URL'), auth: v('CONFLUENCE_AUTH') === 'basic' ? 'basic' : 'bearer', email: v('CONFLUENCE_EMAIL') },
-    jira: { baseUrl: safeUrl('JIRA_BASE_URL'), auth: v('JIRA_AUTH') === 'basic' ? 'basic' : 'bearer', email: v('JIRA_EMAIL'), defaultProject: '' },
+    // An old .env.local without *_AUTH meant a PAT (bearer); with no URL at all it's a fresh install (Cloud default).
+    confluence: { baseUrl: safeUrl('CONFLUENCE_BASE_URL'), auth: authFrom(v('CONFLUENCE_AUTH'), safeUrl('CONFLUENCE_BASE_URL')), email: v('CONFLUENCE_EMAIL') },
+    jira: { baseUrl: safeUrl('JIRA_BASE_URL'), auth: authFrom(v('JIRA_AUTH'), safeUrl('JIRA_BASE_URL')), email: v('JIRA_EMAIL'), defaultProject: '' },
     gitlab: { baseUrl: safeUrl('GITLAB_BASE_URL') },
     ai: {
       ...DEFAULT_SETTINGS.ai,

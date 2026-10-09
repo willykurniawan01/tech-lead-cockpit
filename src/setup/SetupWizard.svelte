@@ -288,18 +288,18 @@
         {:else if step === 'atlassian'}
           <h3>Jira & Confluence</h3>
           <div class="seg" role="group">
-            <button class:active={atlKind === 'cloud'} onclick={() => (atlKind = 'cloud')}>Atlassian Cloud (*.atlassian.net)</button>
-            <button class:active={atlKind === 'datacenter'} onclick={() => (atlKind = 'datacenter')}>Server / Data Center</button>
+            <button class:active={atlKind === 'cloud'} onclick={() => (atlKind = 'cloud')}>Atlassian Cloud · 1 API token</button>
+            <button class:active={atlKind === 'datacenter'} onclick={() => (atlKind = 'datacenter')}>Server / Data Center · PAT</button>
           </div>
           {#if atlKind === 'cloud'}
-            <p class="muted small">Satu API token untuk Jira dan Confluence. Buat di <a href="https://id.atlassian.com/manage-profile/security/api-tokens" target="_blank" rel="noreferrer">id.atlassian.com → Security → API tokens</a>.</p>
+            <p class="muted small">Untuk alamat <code>*.atlassian.net</code>: cukup <strong>email + satu API token</strong> untuk Jira dan Confluence sekaligus. Buat di <a href="https://id.atlassian.com/manage-profile/security/api-tokens" target="_blank" rel="noreferrer">id.atlassian.com → Security → API tokens</a>.</p>
             <div class="grid2">
               <label class="field"><span>URL Atlassian</span><input class="input mono" bind:value={cloudUrl} placeholder="https://namaorg.atlassian.net" /></label>
               <label class="field"><span>Email akun</span><input class="input" bind:value={cloudEmail} placeholder="nama@perusahaan.com" autocomplete="off" /></label>
             </div>
             <label class="field"><span>API token {appSettings.secrets.jira ? '(tersimpan — kosongkan untuk tetap memakai yang lama)' : ''}</span><input class="input" type="password" bind:value={cloudToken} autocomplete="off" /></label>
           {:else}
-            <p class="muted small">Personal Access Token (PAT) dari profil Jira dan Confluence masing-masing.</p>
+            <p class="muted small">Hanya untuk Jira/Confluence yang di-hosting sendiri (bukan <code>*.atlassian.net</code>): masing-masing butuh <strong>Personal Access Token</strong> dari profilnya. Kalau alamatmu <code>*.atlassian.net</code>, pakai tab Atlassian Cloud.</p>
             <div class="grid2">
               <label class="field"><span>URL Jira</span><input class="input mono" bind:value={jiraUrl} placeholder="https://jira.perusahaan.co.id" /></label>
               <label class="field"><span>PAT Jira {appSettings.secrets.jira ? '(tersimpan)' : ''}</span><input class="input" type="password" bind:value={jiraToken} autocomplete="off" /></label>

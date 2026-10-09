@@ -52,8 +52,9 @@ export const DEFAULT_SETTINGS: AppSettings = {
   general: { orgName: '', timezone: 'Asia/Jakarta' },
   // Empty on a fresh install: the setup wizard asks for it.
   workspace: { servicesRoot: '', defaultBaseBranch: 'staging' },
-  confluence: { baseUrl: '', auth: 'bearer', email: '' },
-  jira: { baseUrl: '', auth: 'bearer', email: '', defaultProject: '' },
+  // Atlassian Cloud (email + one API token) is the common case; PAT (bearer) is for Server / Data Center.
+  confluence: { baseUrl: '', auth: 'basic', email: '' },
+  jira: { baseUrl: '', auth: 'basic', email: '', defaultProject: '' },
   gitlab: { baseUrl: '' },
   ai: {
     defaultProvider: '9router',

@@ -33,7 +33,7 @@ describe('renderCockpitContext', () => {
     now: new Date('2026-10-04T08:00:00.000Z'),
     runtime: 'desktop',
     confluence: { configured: true, baseUrl: 'https://acme.atlassian.net/wiki' },
-    jira: { configured: false, error: 'JIRA_BASE_URL belum diisi di .env.local.' },
+    jira: { configured: false, error: 'URL Jira belum diatur (Setup → Jira & Confluence).' },
     teams: { connected: true, user: 'Willy <willy@x>' },
     whatsapp: { connection: 'open', me: 'Willy' },
     ai: [
@@ -48,7 +48,7 @@ describe('renderCockpitContext', () => {
     const out = renderCockpitContext(state, 'apa kabar?');
     expect(out).toContain('aplikasi Mac');
     expect(out).toContain('Confluence: terhubung');
-    expect(out).toContain('Jira: belum terhubung (JIRA_BASE_URL belum diisi di .env.local.)');
+    expect(out).toContain('Jira: belum terhubung (URL Jira belum diatur (Setup → Jira & Confluence).)');
     expect(out).toContain('WhatsApp: terhubung sebagai Willy');
     expect(out).toContain('Claude CLI: tersedia · limit terpakai: Sesi (5 jam) 40%');
     expect(out).toContain('Antigravity CLI: tidak tersedia (agy tidak ditemukan)');

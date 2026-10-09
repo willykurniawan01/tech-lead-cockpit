@@ -88,3 +88,12 @@ describe('settings', () => {
     expect(settings.jira.baseUrl).toBe('https://jira.org.id');
   });
 });
+
+describe('Atlassian auth defaults', () => {
+  it('uses email + API token for Cloud and fresh installs, PAT only for an old Server/DC .env', () => {
+    expect(settingsFromEnv({}).jira.auth).toBe('basic');
+    expect(settingsFromEnv({ JIRA_BASE_URL: 'https://acme.atlassian.net' }).jira.auth).toBe('basic');
+    expect(settingsFromEnv({ JIRA_BASE_URL: 'https://jira.acme.co.id' }).jira.auth).toBe('bearer');
+    expect(settingsFromEnv({ CONFLUENCE_BASE_URL: 'https://confluence.acme.co.id', CONFLUENCE_AUTH: 'basic' }).confluence.auth).toBe('basic');
+  });
+});

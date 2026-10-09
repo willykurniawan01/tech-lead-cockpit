@@ -159,7 +159,7 @@ async function loadConfig(env: Env, readToken: ConnectorDeps['readToken']): Prom
   const baseUrl = (env.CONFLUENCE_BASE_URL ?? '').trim();
   const auth = env.CONFLUENCE_AUTH === 'basic' ? 'basic' : 'bearer';
   if (!baseUrl) {
-    return { status: { configured: false, tokenPresent: false, error: 'CONFLUENCE_BASE_URL belum diisi di .env.local.' } };
+    return { status: { configured: false, tokenPresent: false, error: 'URL Confluence belum diatur (Setup → Jira & Confluence).' } };
   }
   const flavor = flavorOf(env);
   const token = await readToken();
@@ -178,7 +178,7 @@ async function loadJiraConfig(env: Env): Promise<{ cfg?: JiraConfig; status: Jir
   const auth = (env.JIRA_AUTH === 'bearer' ? 'bearer' : 'basic') as 'basic' | 'bearer';
 
   if (!baseUrl) {
-    return { status: { configured: false, tokenPresent: false, error: 'JIRA_BASE_URL belum diisi di .env.local.' } };
+    return { status: { configured: false, tokenPresent: false, error: 'URL Jira belum diatur (Setup → Jira & Confluence).' } };
   }
 
   const flavor = jiraFlavorOf(env, baseUrl);
