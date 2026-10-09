@@ -245,6 +245,10 @@ flowchart TD
 4. **Sinkronisasi Opsional ke Tabel 'Change History' Dokumen**:
    - Checkbox `Catat juga ke tabel Change History di dokumen` memungkinkan Tech Lead menyinkronkan catatan versi yang baru dibuat langsung ke tabel Change History di Markdown dokumen TAD (`appendChangeHistoryRow()`).
    - Format baris baru: `| <Catatan Versi> | <YYYY-MM-DD> | @<Author/Tech Lead> |`.
+5. **Konfigurasi Model & Provider AI**:
+   - Tepat di sebelah tombol `Generate AI`, terdapat badge indikator model (ikon bot) yang menampilkan AI aktif saat ini (mis. `claude`, `inferhub`, `9router`, dsb.).
+   - Mengklik badge tersebut akan membuka panel dropdown `<AiPicker />` inline untuk mengganti provider atau model kapan saja.
+   - Pilihan model secara default mewarisi preferensi AI generator TAD (`loadAiSelection('generator')`) dan disimpan ke `localStorage`.
 
 ### 2. Kontrak API & Endpoints
 - **Endpoint**: `POST /api/connector/confluence/changelog`

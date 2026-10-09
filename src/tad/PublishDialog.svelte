@@ -18,6 +18,9 @@
   import { drafts, type Draft } from './drafts.svelte';
   import { copyForConfluence, diagramUploads } from './export';
   import PreviewPane from './PreviewPane.svelte';
+  import AiPicker from '../components/AiPicker.svelte';
+  import { loadAiSelection, saveAiSelection } from '../lib/ai/providers.svelte';
+  import type { AiSelection } from '../lib/ai/types';
 
   let {
     open = $bindable(false),
@@ -38,6 +41,8 @@
   let versionMessage = $state('Diperbarui dari Tech Lead Cockpit');
   let generatingChangelog = $state(false);
   let syncChangeHistory = $state(false);
+  let ai = $state<AiSelection>(loadAiSelection('generator'));
+  let showAiConfig = $state(false);
   let opts = $state<StorageOptions>({ mermaid: 'attachment', mermaidMacro: 'mermaid-cloud', toc: true });
 
   let preflight = $state<PreflightResponse | null>(null);
@@ -155,6 +160,7 @@
       confirmExisting = false;
       generatingChangelog = false;
       syncChangeHistory = false;
+      showAiConfig = false;
       loadStatus();
     });
   });
@@ -278,6 +284,7 @@
         isNewPage,
         sectionsChanged,
         diffSnippet,
+        ai,
       });
 
       if (res.message) {
@@ -449,17 +456,37 @@
           <div class="field">
             <div class="field-head">
               <span>Catatan versi</span>
-              <button
-                type="button"
-                class="ai-btn"
-                onclick={generateChangelog}
-                disabled={generatingChangelog || checking || !connected}
-                title={preflightFresh ? 'Generate catatan versi otomatis dengan AI berdasarkan diff target' : 'Cek target dan generate catatan versi otomatis dengan AI'}
-              >
-                <Icon name="sparkles" size={12} />
-                {generatingChangelog ? 'Menyusun…' : checking ? 'Mengecek target…' : 'Generate AI'}
-              </button>
+              <div class="field-head-actions">
+                <button
+                  type="button"
+                  class="ai-model-badge"
+                  onclick={() => (showAiConfig = !showAiConfig)}
+                  title="Pilih provider dan model AI untuk generate catatan versi"
+                >
+                  <Icon name="bot" size={11} />
+                  <span>{ai.provider}{ai.model ? ` · ${ai.model}` : ''}</span>
+                </button>
+                <button
+                  type="button"
+                  class="ai-btn"
+                  onclick={generateChangelog}
+                  disabled={generatingChangelog || checking || !connected}
+                  title={preflightFresh ? 'Generate catatan versi otomatis dengan AI berdasarkan diff target' : 'Cek target dan generate catatan versi otomatis dengan AI'}
+                >
+                  <Icon name="sparkles" size={12} />
+                  {generatingChangelog ? 'Menyusun…' : checking ? 'Mengecek target…' : 'Generate AI'}
+                </button>
+              </div>
             </div>
+            {#if showAiConfig}
+              <div class="ai-config-panel">
+                <div class="ai-config-title">
+                  <span class="muted small">Pilih AI untuk Catatan Versi:</span>
+                  <button type="button" class="btn btn-xs btn-ghost" onclick={() => (showAiConfig = false)}>Tutup</button>
+                </div>
+                <AiPicker value={ai} onchange={(s) => { ai = s; saveAiSelection('generator', s); }} disabled={generatingChangelog} />
+              </div>
+            {/if}
             <input class="input" bind:value={versionMessage} placeholder="mis. Diperbarui dari Tech Lead Cockpit" />
             <label class="check small-check">
               <input type="checkbox" bind:checked={syncChangeHistory} />
@@ -749,6 +776,45 @@
     font-size: 12.5px;
     font-weight: 500;
     color: var(--text-2);
+  }
+  .field-head-actions {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .ai-model-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 2px 6px;
+    border-radius: 4px;
+    border: 1px solid var(--border);
+    background: var(--surface-2);
+    color: var(--text-2);
+    font-size: 10.5px;
+    font-family: var(--font-mono, monospace);
+    cursor: pointer;
+    transition: all 0.12s;
+  }
+  .ai-model-badge:hover {
+    border-color: var(--accent);
+    color: var(--accent);
+    background: var(--accent-soft);
+  }
+  .ai-config-panel {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 8px;
+    border: 1px dashed var(--border);
+    border-radius: var(--radius-sm);
+    background: var(--surface-2);
+    margin: 2px 0 4px;
+  }
+  .ai-config-title {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
   }
   .ai-btn {
     display: inline-flex;
