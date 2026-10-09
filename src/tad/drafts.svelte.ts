@@ -7,9 +7,10 @@ import type { PrdSource } from '../lib/prd/confluence-prd';
 export interface ConfluenceTarget {
   spaceKey: string;
   parentId: string;
-  /** Set after the first publish; later publishes update this page. */
+  /** Set after the first publish or save draft; later publishes update this page. */
   pageId?: string;
   version?: number;
+  status?: 'current' | 'draft';
   url?: string;
   publishedAt?: string;
 }

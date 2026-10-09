@@ -1,3 +1,5 @@
+import type { AiSelection } from '../ai/types.ts';
+
 /** Contract between the UI and the local connector (dev server today, Tauri/Go sidecar later). */
 
 export type Flavor = 'cloud' | 'datacenter';
@@ -19,6 +21,7 @@ export interface PageInfo {
   version: number;
   url: string;
   spaceKey: string;
+  status?: 'current' | 'draft';
   storage?: string;
 }
 
@@ -59,11 +62,26 @@ export interface PublishRequest {
   versionMessage?: string;
   attachments: AttachmentUpload[];
   context: { draftId: string; mrUrl?: string; jiraKeys?: string[] };
+  /** When true, saved as unpublished draft without bumping public version. */
+  asDraft?: boolean;
 }
 
 export interface PublishResponse {
   page: PageInfo;
   action: 'create' | 'update';
+  isDraft?: boolean;
+}
+
+export interface ChangelogRequest {
+  title: string;
+  isNewPage?: boolean;
+  sectionsChanged?: string[];
+  diffSnippet?: string;
+  ai?: AiSelection;
+}
+
+export interface ChangelogResponse {
+  message: string;
 }
 
 export interface ConnectorError {
@@ -90,4 +108,5 @@ export interface AuditEvent {
   jiraKeys?: string[];
   actor?: string;
   error?: string;
+  isDraft?: boolean;
 }

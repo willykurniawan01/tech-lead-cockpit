@@ -93,6 +93,10 @@ function inline(node: Node, inTable = false): string {
       return href ? `[${text || href}](${href})` : text;
     }
     case 'span': {
+      if (el.hasAttribute('data-tlc-user') || el.hasAttribute('data-account-id') || el.classList.contains('confluence-user-mention')) {
+        const accId = el.getAttribute('data-tlc-user') || el.getAttribute('data-account-id') || '';
+        return mentionHtml(accId, el.textContent?.replace(/^@/, '').trim());
+      }
       if (el.classList.contains('lozenge')) {
         return (el.textContent ?? '').trim();
       }
@@ -236,8 +240,9 @@ function serializeHtmlNode(node: Node): string {
     return statusHtml(el.textContent?.trim() ?? '', el.getAttribute('data-tlc-status') || 'Grey');
   }
   if (el.hasAttribute('data-tlc-jira')) return jiraHtml(el.getAttribute('data-tlc-jira') ?? '');
-  if (el.hasAttribute('data-tlc-user')) {
-    return mentionHtml(el.getAttribute('data-tlc-user') ?? '', el.textContent?.replace(/^@/, '').trim());
+  if (el.hasAttribute('data-tlc-user') || el.hasAttribute('data-account-id') || el.classList.contains('confluence-user-mention')) {
+    const accId = el.getAttribute('data-tlc-user') || el.getAttribute('data-account-id') || '';
+    return mentionHtml(accId, el.textContent?.replace(/^@/, '').trim());
   }
 
   if (el.classList.contains('lozenge')) {

@@ -7,7 +7,7 @@ import { connectorMiddleware } from './dev-connector.ts';
 
 /** In-memory stand-in for Confluence Data Center (v1) and Cloud (v2 pages + v1 attachments). */
 function mockConfluence() {
-  type Page = { id: string; title: string; spaceKey: string; version: number; storage: string; parentId?: string };
+  type Page = { id: string; title: string; spaceKey: string; version: number; storage: string; parentId?: string; status?: 'current' | 'draft' };
   const state = {
     pages: new Map<string, Page>(),
     attachments: new Map<string, { id: string; filename: string; versions: number }>(),
@@ -28,6 +28,7 @@ function mockConfluence() {
   const dc = (p: Page) => ({
     id: p.id,
     title: p.title,
+    status: p.status ?? 'current',
     version: { number: p.version },
     space: { key: p.spaceKey },
     body: { storage: { value: p.storage } },
@@ -36,6 +37,7 @@ function mockConfluence() {
   const cloud = (p: Page) => ({
     id: p.id,
     title: p.title,
+    status: p.status ?? 'current',
     version: { number: p.version },
     body: { storage: { value: p.storage } },
     _links: { webui: `/spaces/${p.spaceKey}/pages/${p.id}` },
@@ -63,8 +65,14 @@ function mockConfluence() {
     if (req.method === 'GET' && path === '/rest/api/user') {
       return url.searchParams.get('accountId') === 'acc-1' || url.searchParams.get('key') === 'acc-1' ? json(res, 200, { displayName: 'Willy kurniawan' }) : json(res, 404, { message: 'no user' });
     }
-    if (req.method === 'GET' && path === '/rest/api/content') return json(res, 200, { results: findByTitle(url.searchParams.get('title')).map(dc) });
-    if (req.method === 'GET' && path === '/api/v2/pages') return json(res, 200, { results: findByTitle(url.searchParams.get('title')).map(cloud) });
+    if (req.method === 'GET' && path === '/rest/api/content') {
+      const statusFilter = url.searchParams.get('status') ?? 'current';
+      return json(res, 200, { results: findByTitle(url.searchParams.get('title')).filter((p) => (p.status ?? 'current') === statusFilter).map(dc) });
+    }
+    if (req.method === 'GET' && path === '/api/v2/pages') {
+      const statusFilter = url.searchParams.get('status') ?? 'current';
+      return json(res, 200, { results: findByTitle(url.searchParams.get('title')).filter((p) => (p.status ?? 'current') === statusFilter).map(cloud) });
+    }
 
     if ((m = path.match(/^\/(?:rest\/api\/content|api\/v2\/pages)\/(\d+)$/))) {
       const page = state.pages.get(m[1]);
@@ -72,8 +80,14 @@ function mockConfluence() {
       if (req.method === 'GET') return json(res, 200, cloudMode ? cloud(page) : dc(page));
       if (req.method === 'PUT') {
         const b = JSON.parse((await body(req)).toString());
-        if (b.version.number !== page.version + 1) return json(res, 409, { message: 'Version must be incremented' });
-        Object.assign(page, { title: b.title, version: b.version.number, storage: cloudMode ? b.body.value : b.body.storage.value });
+        const expectedNext = (b.status === 'draft' || page.status === 'draft') ? page.version : page.version + 1;
+        if (b.version.number !== expectedNext) return json(res, 409, { message: 'Version mismatch' });
+        Object.assign(page, {
+          title: b.title,
+          version: b.version.number,
+          status: b.status ?? page.status ?? 'current',
+          storage: cloudMode ? b.body.value : b.body.storage.value,
+        });
         return json(res, 200, cloudMode ? cloud(page) : dc(page));
       }
     }
@@ -85,6 +99,7 @@ function mockConfluence() {
         id: String(++state.seq),
         title: b.title,
         spaceKey: space.key,
+        status: b.status ?? 'current',
         version: 1,
         storage: cloudMode ? b.body.value : b.body.storage.value,
         parentId: cloudMode ? b.parentId : b.ancestors?.[0]?.id,
@@ -205,6 +220,52 @@ describe.each([
       ['confluence.update', 'success', 1, 2],
     ]);
     expect(JSON.stringify(audit)).not.toContain('<p>');
+  });
+
+  it('saves page as draft without incrementing version, and allows subsequent publishing', async () => {
+    // 1. Create initial page as draft
+    const draftCreated = await call('/confluence/publish', {
+      json: publishReq({ title: 'TAD — Draft Test', storage: '<p>draft v1</p>', asDraft: true }),
+    });
+    expect(draftCreated.status).toBe(200);
+    const { page: draftPage, action: createAction, isDraft: isDraftCreated } = await draftCreated.json();
+    expect(createAction).toBe('create');
+    expect(isDraftCreated).toBe(true);
+    expect(draftPage.version).toBe(1);
+    expect(draftPage.status).toBe('draft');
+
+    // 2. Update existing draft as draft (version must stay at 1)
+    const draftUpdated = await call('/confluence/publish', {
+      json: publishReq({
+        title: 'TAD — Draft Test',
+        storage: '<p>draft v1 edited</p>',
+        pageId: draftPage.id,
+        expectedVersion: 1,
+        asDraft: true,
+      }),
+    });
+    expect(draftUpdated.status).toBe(200);
+    const { page: draftPage2, action: updateAction, isDraft: isDraftUpdated } = await draftUpdated.json();
+    expect(updateAction).toBe('update');
+    expect(isDraftUpdated).toBe(true);
+    expect(draftPage2.version).toBe(1); // Not incremented!
+    expect(draftPage2.status).toBe('draft');
+
+    // 3. Publish the draft (status becomes current)
+    const published = await call('/confluence/publish', {
+      json: publishReq({
+        title: 'TAD — Draft Test',
+        storage: '<p>published v1</p>',
+        pageId: draftPage.id,
+        expectedVersion: 1,
+        asDraft: false,
+      }),
+    });
+    expect(published.status).toBe(200);
+    const { page: publishedPage, isDraft: isPublishedDraft } = await published.json();
+    expect(isPublishedDraft).toBe(false);
+    expect(publishedPage.version).toBe(1);
+    expect(publishedPage.status).toBe('current');
   });
 
   it('searches pages and imports one with mention names resolved', async () => {

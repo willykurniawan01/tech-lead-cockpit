@@ -6,6 +6,7 @@
   import type { ConnectorStatus, PreflightResponse, PublishResponse } from '../lib/confluence/api-types';
   import { connector, ConnectorRequestError } from '../lib/confluence/client';
   import { plainMentionCandidates, toConfluenceStorage, type StorageOptions } from '../lib/confluence/storage';
+  import { appendChangeHistoryRow } from '../lib/confluence/changelog';
   import ConfluenceMergeModal from './ConfluenceMergeModal.svelte';
   import JiraTicketsDialog from './JiraTicketsDialog.svelte';
   import { tasksWithoutTicket } from '../lib/tad/tad-tickets';
@@ -17,6 +18,9 @@
   import { drafts, type Draft } from './drafts.svelte';
   import { copyForConfluence, diagramUploads } from './export';
   import PreviewPane from './PreviewPane.svelte';
+  import AiPicker from '../components/AiPicker.svelte';
+  import { loadAiSelection, saveAiSelection } from '../lib/ai/providers.svelte';
+  import type { AiSelection } from '../lib/ai/types';
 
   let {
     open = $bindable(false),
@@ -35,6 +39,10 @@
   let spaceKey = $state('');
   let parentId = $state('');
   let versionMessage = $state('Diperbarui dari Tech Lead Cockpit');
+  let generatingChangelog = $state(false);
+  let syncChangeHistory = $state(false);
+  let ai = $state<AiSelection>(loadAiSelection('generator'));
+  let showAiConfig = $state(false);
   let opts = $state<StorageOptions>({ mermaid: 'attachment', mermaidMacro: 'mermaid-cloud', toc: true });
 
   let preflight = $state<PreflightResponse | null>(null);
@@ -50,6 +58,7 @@
   const COLLAPSE_AT = 60;
 
   let publishing = $state(false);
+  let savingDraft = $state(false);
   let publishError = $state('');
   let result = $state<PublishResponse | null>(null);
   let ticketsOpen = $state(false);
@@ -149,6 +158,9 @@
       publishError = '';
       result = null;
       confirmExisting = false;
+      generatingChangelog = false;
+      syncChangeHistory = false;
+      showAiConfig = false;
       loadStatus();
     });
   });
@@ -177,8 +189,14 @@
     try {
       const page = await connector.page({ id: pageId });
       const users: Record<string, string> = {};
-      for (const m of (page.storage ?? '').matchAll(/<ri:user\s+ri:(?:account-id|userkey)="([^"]+)"[^>]*?data-display-name="([^"]+)"/g)) {
-        users[m[2].replace(/&#(\d+);/g, (_, n: string) => String.fromCharCode(Number(n))).replace(/&amp;/g, '&')] = m[1];
+      for (const m of (page.storage ?? '').matchAll(/<ri:user\b([^>]*?)\/?>/g)) {
+        const attrs = m[1];
+        const idMatch = attrs.match(/ri:(?:account-id|userkey|username)="([^"]+)"/);
+        const nameMatch = attrs.match(/data-display-name="([^"]+)"/);
+        if (idMatch && nameMatch) {
+          const rawName = nameMatch[1].replace(/&#(\d+);/g, (_, n: string) => String.fromCharCode(Number(n))).replace(/&amp;/g, '&');
+          users[rawName] = idMatch[1];
+        }
       }
       return users;
     } catch {
@@ -213,17 +231,97 @@
     }
   }
 
-  async function publish() {
+  async function generateChangelog() {
+    if (generatingChangelog || checking) return;
+    if (!connected) {
+      toasts.show('Connector Confluence belum terhubung.', 'err');
+      return;
+    }
+    if (!spaceKey.trim() || !title) {
+      toasts.show('Space key dan judul halaman wajib diisi terlebih dahulu.', 'info');
+      return;
+    }
+
+    generatingChangelog = true;
+    try {
+      if (!preflightFresh) {
+        await check();
+      }
+      if (preflightError) {
+        toasts.show(`Gagal cek target: ${preflightError}`, 'err');
+        return;
+      }
+
+      const isNewPage = !existing;
+      let sectionsChanged: string[] = [];
+      let diffSnippet = '';
+
+      if (hunks.length) {
+        const uniqueSections = new Set<string>();
+        for (const h of hunks) {
+          if (h.section && h.section !== 'Dokumen' && h.section !== 'Prolog') {
+            uniqueSections.add(h.section);
+          }
+        }
+        sectionsChanged = Array.from(uniqueSections);
+      }
+
+      if (diff?.length) {
+        const changedLines: string[] = [];
+        for (const d of diff) {
+          if (d.type === 'add') {
+            changedLines.push(`+ ${d.text}`);
+          } else if (d.type === 'del') {
+            changedLines.push(`- ${d.text}`);
+          }
+          if (changedLines.length >= 80) break;
+        }
+        diffSnippet = changedLines.join('\n');
+      }
+
+      const res = await connector.generateChangelog({
+        title,
+        isNewPage,
+        sectionsChanged,
+        diffSnippet,
+        ai,
+      });
+
+      if (res.message) {
+        versionMessage = res.message;
+        toasts.show('Catatan versi berhasil dibuat oleh AI.', 'ok');
+      }
+    } catch (err) {
+      toasts.show(`Gagal membuat catatan versi: ${err instanceof Error ? err.message : String(err)}`, 'err');
+    } finally {
+      generatingChangelog = false;
+    }
+  }
+
+  async function publish(asDraft = false) {
     if (blockers.length) return;
-    publishing = true;
+    publishing = !asDraft;
+    savingDraft = asDraft;
     publishError = '';
     saveTarget();
     try {
-      const attachments = opts.mermaid === 'attachment' && storage.diagrams.length ? await diagramUploads(storage.diagrams) : [];
+      let currentMarkdown = draft.markdown;
+      if (syncChangeHistory && versionMessage.trim()) {
+        const author = status?.user || '';
+        const updatedMarkdown = appendChangeHistoryRow(currentMarkdown, versionMessage.trim(), author);
+        if (updatedMarkdown !== currentMarkdown) {
+          currentMarkdown = updatedMarkdown;
+          drafts.update(draft.id, { markdown: updatedMarkdown });
+        }
+      }
+      const currentStorage = currentMarkdown !== draft.markdown
+        ? toConfluenceStorage(currentMarkdown, { ...opts, knownUsers })
+        : storage;
+      const attachments = opts.mermaid === 'attachment' && currentStorage.diagrams.length ? await diagramUploads(currentStorage.diagrams) : [];
       result = await connector.publish({
         spaceKey: spaceKey.trim(),
-        title,
-        storage: storage.xhtml,
+        title: currentStorage.title ?? title,
+        storage: currentStorage.xhtml,
         parentId: parentId.trim() || undefined,
         pageId: existing?.id,
         // Linked page: the draft's own base version, so an edit made in Confluence meanwhile is refused
@@ -232,6 +330,7 @@
         versionMessage: versionMessage.trim() || undefined,
         attachments,
         context: { draftId: draft.id, mrUrl: draft.source?.mrUrl, jiraKeys: draft.source?.jiraKeys || [] },
+        asDraft,
       });
       drafts.update(draft.id, {
         confluence: {
@@ -239,12 +338,17 @@
           parentId: parentId.trim(),
           pageId: result.page.id,
           version: result.page.version,
+          status: result.isDraft ? 'draft' : 'current',
           url: result.page.url,
           publishedAt: new Date().toISOString(),
         },
       });
       drafts.saveNow();
-      toasts.show(result.action === 'create' ? 'Halaman Confluence dibuat.' : `Halaman diperbarui ke versi ${result.page.version}.`, 'ok');
+      if (result.isDraft) {
+        toasts.show(`Draft Confluence berhasil disimpan (versi tetap ${result.page.version}).`, 'ok');
+      } else {
+        toasts.show(result.action === 'create' ? 'Halaman Confluence dibuat.' : `Halaman diperbarui ke versi ${result.page.version}.`, 'ok');
+      }
     } catch (e) {
       publishError = e instanceof Error ? e.message : String(e);
       if (e instanceof ConnectorRequestError && (e.body.code === 'conflict' || e.body.code === 'exists')) {
@@ -253,6 +357,7 @@
       }
     } finally {
       publishing = false;
+      savingDraft = false;
     }
   }
 
@@ -270,10 +375,10 @@
   {#if result}
     <div class="done">
       <div class="done-icon"><Icon name="check" size={28} /></div>
-      <h3>{result.action === 'create' ? 'Halaman dibuat' : 'Halaman diperbarui'}</h3>
-      <p class="muted">{result.page.title} · versi {result.page.version} · space {result.page.spaceKey || spaceKey}</p>
+      <h3>{result.isDraft ? 'Draft Confluence disimpan' : result.action === 'create' ? 'Halaman dibuat' : 'Halaman diperbarui'}</h3>
+      <p class="muted">{result.page.title} · versi {result.page.version} {result.isDraft ? '(draft)' : ''} · space {result.page.spaceKey || spaceKey}</p>
       <a class="btn btn-primary" href={result.page.url} target="_blank" rel="noreferrer"><Icon name="external" /> Buka di Confluence</a>
-      <p class="muted small">Tercatat di Audit log.</p>
+      <p class="muted small">{result.isDraft ? 'Disimpan sebagai unpublished draft (tidak menaikkan versi). Tercatat di Audit log.' : 'Tercatat di Audit log.'}</p>
       {#if withoutTicket.length}
         <div class="next-step">
           <Icon name="jira" size={15} />
@@ -348,10 +453,46 @@
             </label>
           {/if}
           <label class="check"><input type="checkbox" bind:checked={opts.toc} /> Tambahkan daftar isi (TOC macro)</label>
-          <label class="field">
-            <span>Catatan versi</span>
-            <input class="input" bind:value={versionMessage} />
-          </label>
+          <div class="field">
+            <div class="field-head">
+              <span>Catatan versi</span>
+              <div class="field-head-actions">
+                <button
+                  type="button"
+                  class="ai-model-badge"
+                  onclick={() => (showAiConfig = !showAiConfig)}
+                  title="Pilih provider dan model AI untuk generate catatan versi"
+                >
+                  <Icon name="bot" size={11} />
+                  <span>{ai.provider}{ai.model ? ` · ${ai.model}` : ''}</span>
+                </button>
+                <button
+                  type="button"
+                  class="ai-btn"
+                  onclick={generateChangelog}
+                  disabled={generatingChangelog || checking || !connected}
+                  title={preflightFresh ? 'Generate catatan versi otomatis dengan AI berdasarkan diff target' : 'Cek target dan generate catatan versi otomatis dengan AI'}
+                >
+                  <Icon name="sparkles" size={12} />
+                  {generatingChangelog ? 'Menyusun…' : checking ? 'Mengecek target…' : 'Generate AI'}
+                </button>
+              </div>
+            </div>
+            {#if showAiConfig}
+              <div class="ai-config-panel">
+                <div class="ai-config-title">
+                  <span class="muted small">Pilih AI untuk Catatan Versi:</span>
+                  <button type="button" class="btn btn-xs btn-ghost" onclick={() => (showAiConfig = false)}>Tutup</button>
+                </div>
+                <AiPicker value={ai} onchange={(s) => { ai = s; saveAiSelection('generator', s); }} disabled={generatingChangelog} />
+              </div>
+            {/if}
+            <input class="input" bind:value={versionMessage} placeholder="mis. Diperbarui dari Tech Lead Cockpit" />
+            <label class="check small-check">
+              <input type="checkbox" bind:checked={syncChangeHistory} />
+              <span>Catat juga ke tabel Change History dokumen</span>
+            </label>
+          </div>
         </section>
       </div>
 
@@ -375,9 +516,13 @@
               {#if preflight.parent}<div><span class="muted">Parent</span> {preflight.parent.title}</div>{/if}
               {#if existing}
                 <div>
-                  <span class="chip chip-warn">Update</span>
+                  <span class="chip {existing.status === 'draft' ? 'chip-accent' : 'chip-warn'}">{existing.status === 'draft' ? 'Draft' : 'Update'}</span>
                   <a href={existing.url} target="_blank" rel="noreferrer">{existing.title}</a>
-                  <span class="muted">v{existing.version} → v{existing.version + 1}</span>
+                  {#if existing.status === 'draft'}
+                    <span class="muted">v{existing.version} (draft aktif)</span>
+                  {:else}
+                    <span class="muted">v{existing.version} → v{existing.version + 1}</span>
+                  {/if}
                 </div>
               {:else}
                 <div><span class="chip chip-ok">Halaman baru</span> akan dibuat{preflight.parent ? ' di bawah parent' : ' di root space'}.</div>
@@ -532,11 +677,15 @@
     {#if result}
       <button class="btn" onclick={() => (open = false)}>Tutup</button>
     {:else}
-      <span class="blocker small muted">{blockers[0] ?? 'Siap dipublish.'}</span>
+      <span class="blocker small muted">{blockers[0] ?? (existing?.status === 'draft' ? 'Draft Confluence siap disimpan atau dipublish.' : 'Siap dipublish atau disimpan sebagai draft.')}</span>
       <button class="btn" onclick={() => (open = false)}>Batal</button>
-      <button class="btn btn-primary" onclick={publish} disabled={blockers.length > 0 || publishing}>
+      <button class="btn" onclick={() => publish(true)} disabled={blockers.length > 0 || publishing || savingDraft} title="Simpan sebagai draft di Confluence tanpa menaikkan nomor versi">
+        <Icon name="save" size={14} />
+        {savingDraft ? 'Menyimpan draft…' : existing ? `Simpan Draft (tetap v${existing.version})` : 'Simpan sebagai Draft'}
+      </button>
+      <button class="btn btn-primary" onclick={() => publish(false)} disabled={blockers.length > 0 || publishing || savingDraft}>
         <Icon name="upload" />
-        {publishing ? 'Mempublish…' : existing ? `Update ke v${existing.version + 1}` : 'Publish halaman baru'}
+        {publishing ? 'Mempublish…' : existing ? (existing.status === 'draft' ? `Publish Draft (v${existing.version})` : `Update ke v${existing.version + 1}`) : 'Publish halaman baru'}
       </button>
     {/if}
   {/snippet}
@@ -618,6 +767,81 @@
   .field em {
     font-style: normal;
     font-weight: 400;
+  }
+  .field-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 6px;
+    font-size: 12.5px;
+    font-weight: 500;
+    color: var(--text-2);
+  }
+  .field-head-actions {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .ai-model-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 2px 6px;
+    border-radius: 4px;
+    border: 1px solid var(--border);
+    background: var(--surface-2);
+    color: var(--text-2);
+    font-size: 10.5px;
+    font-family: var(--font-mono, monospace);
+    cursor: pointer;
+    transition: all 0.12s;
+  }
+  .ai-model-badge:hover {
+    border-color: var(--accent);
+    color: var(--accent);
+    background: var(--accent-soft);
+  }
+  .ai-config-panel {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 8px;
+    border: 1px dashed var(--border);
+    border-radius: var(--radius-sm);
+    background: var(--surface-2);
+    margin: 2px 0 4px;
+  }
+  .ai-config-title {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+  .ai-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 2px 7px;
+    border-radius: 4px;
+    border: 1px solid var(--accent);
+    background: var(--accent-soft);
+    color: var(--accent);
+    font-size: 11px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.15s ease;
+  }
+  .ai-btn:hover:not(:disabled) {
+    background: var(--accent);
+    color: var(--accent-text, #fff);
+  }
+  .ai-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+  .small-check {
+    font-size: 11.5px;
+    color: var(--text-3);
+    margin-top: 2px;
   }
   .small {
     font-size: 12.5px;

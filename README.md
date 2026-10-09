@@ -16,14 +16,165 @@ Rencana lengkap: [docs/PLAN.md](docs/PLAN.md).
 | Balas WhatsApp (AI + template) | ✅ Tautkan via QR (linked device), draft AI lewat Claude CLI, template per audiens, kirim manual dengan konfirmasi |
 | MR Review, Jira Automation, Dashboard | Tahap lanjutan (Phase 1, 4, 5) |
 
-## Menjalankan
+## 💻 Prasyarat Sistem (Prerequisites)
+
+- **Node.js**: Node.js 22 LTS atau yang lebih baru (ESM native), ATAU runtime **Bun** (`>= 1.2`).
+- **Rust Toolchain** *(hanya jika menjalankan/membangun desktop Tauri)*:
+  ```bash
+  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+  ```
+- **Sistem Operasi**: macOS 11+ (Apple Silicon atau Intel) dengan dukungan `/usr/bin/security` (Keychain).
+
+---
+
+## 📦 Instalasi
+
+Pilih package manager favorit Anda (**npm**, **bun**, atau **pnpm**):
 
 ```bash
+# Menggunakan npm
 npm install
-npm run dev        # http://127.0.0.1:5173
-npm test           # unit + integration test
-npm run check      # type check
+
+# ATAU menggunakan bun
+bun install
+
+# ATAU menggunakan pnpm
+pnpm install
 ```
+
+---
+
+## 🚀 Cara Menjalankan (Development Modes)
+
+Aplikasi menyediakan beberapa mode eksekusi sesuai kebutuhan:
+
+### 1. Mode Web Dev (Browser di http://127.0.0.1:5173)
+Menjalankan frontend Svelte 5 dengan integrated Vite dev server dan plugin connector sidecar:
+```bash
+npm run dev
+# atau: bun run dev / pnpm dev
+```
+> [!NOTE]
+> Mode ini menyajikan UI di port `5173` dengan backend connector otomatis aktif di rute `/api/connector/*` pada port yang sama.
+
+### 2. Mode Native Desktop (Tauri v2 Dev Window)
+Menjalankan aplikasi langsung sebagai jendela desktop native macOS dengan hot-reload:
+```bash
+npm run dev:desktop
+# atau: bun run dev:desktop / pnpm dev:desktop
+```
+> [!TIP]
+> Mode ini otomatis menjalankan Vite dev server dan meluncurkan native desktop shell Tauri v2.
+
+### 3. Mode Fresh Profile (Lingkungan Uji Terisolasi)
+Menjalankan dev server di port `5180` dengan direktori konfigurasi terisolasi (`TLC_PROFILE=test`):
+```bash
+npm run dev:fresh
+# atau: bun run dev:fresh / pnpm dev:fresh
+```
+
+### 4. Mode Standalone Connector
+Membundle dan menjalankan backend local connector secara independen sebagai Node server di port `5174`:
+```bash
+npm run connector
+# atau: bun run connector / pnpm connector
+```
+
+---
+
+## 🏗️ Cara Build (Production Packaging)
+
+### 1. Build Desktop Native macOS (`.app` & `.dmg`)
+Membangun aplikasi desktop native siap pakai yang menggabungkan seluruh komponen:
+```bash
+npm run build:desktop
+# atau: bun run build:desktop / pnpm build:desktop
+```
+Pipeline ini secara otomatis:
+1. Mem-build UI frontend Svelte 5 via Vite (`dist/`).
+2. Mem-bundle local connector Node.js via Vite (`dist-connector/server.mjs`).
+3. Mem-bundle VPS scheduled reporter via Vite (`dist-reporter/tad-progress.mjs`).
+4. Mengompilasi Rust shell Tauri v2 ke file binary dan installer native:
+   - **File `.dmg`**: `src-tauri/target/release/bundle/dmg/`
+   - **File `.app`**: `src-tauri/target/release/bundle/macos/`
+
+### 2. Build Frontend Web Saja
+Mengompilasi aset UI Svelte 5 ke direktori `dist/`:
+```bash
+npm run build
+# atau: bun run build / pnpm build
+
+# Preview hasil build lokal (port 4173):
+npm run preview
+# atau: bun run preview / pnpm preview
+```
+
+### 3. Build Sidecar Connector Saja
+Membundle server API connector mandiri:
+```bash
+npm run build:connector
+# atau: bun run build:connector / pnpm build:connector
+# Output: dist-connector/server.mjs
+```
+
+### 4. Build Scheduled Reporter VPS Saja
+Membundle script pengirim laporan progres TAD WhatsApp untuk cron server:
+```bash
+npm run build:reporter
+# atau: bun run build:reporter / pnpm build:reporter
+# Output: dist-reporter/tad-progress.mjs
+```
+
+---
+
+## 🧪 Verifikasi & Pengujian
+
+Sebelum commit atau deploy, jalankan verifikasi type check dan pengujian:
+
+```bash
+# Type-checking Svelte 5 Runes & TypeScript strict
+npm run check
+# atau: bun run check / pnpm check
+
+# Menjalankan unit & integration tests (Vitest + JSDOM)
+npm test
+# atau: bun test / pnpm test
+```
+
+---
+
+## 🔑 Pengaturan Kredensial & Token (macOS Keychain)
+
+Simpan token akses secara aman langsung ke macOS Keychain (tidak pernah ditulis ke file `.env`):
+
+```bash
+npm run token:confluence  # Token Confluence Cloud/DC
+npm run token:jira        # Token Atlassian Jira
+npm run token:gitlab      # Personal Access Token GitLab
+npm run token:inferhub    # API Key InferHub
+npm run token:9router     # API Key 9Router
+```
+*(Bisa juga dijalankan dengan `bun run token:<name>` atau `pnpm token:<name>`)*
+
+---
+
+## 📋 Tabel Perbandingan Perintah (Cheat Sheet)
+
+| Kebutuhan | Perintah NPM | Perintah Bun | Perintah pnpm |
+|---|---|---|---|
+| **Instalasi** | `npm install` | `bun install` | `pnpm install` |
+| **Web Dev** | `npm run dev` | `bun run dev` | `pnpm dev` |
+| **Desktop Dev** | `npm run dev:desktop` | `bun run dev:desktop` | `pnpm dev:desktop` |
+| **Fresh Dev Profile** | `npm run dev:fresh` | `bun run dev:fresh` | `pnpm dev:fresh` |
+| **Build Desktop (.dmg/.app)** | `npm run build:desktop` | `bun run build:desktop` | `pnpm build:desktop` |
+| **Build Frontend** | `npm run build` | `bun run build` | `pnpm build` |
+| **Build Connector** | `npm run build:connector` | `bun run build:connector` | `pnpm build:connector` |
+| **Build Reporter** | `npm run build:reporter` | `bun run build:reporter` | `pnpm build:reporter` |
+| **Type Check** | `npm run check` | `bun run check` | `pnpm check` |
+| **Unit Tests** | `npm test` | `bun test` | `pnpm test` |
+| **Set Confluence Token** | `npm run token:confluence` | `bun run token:confluence` | `pnpm token:confluence` |
+| **Set Jira Token** | `npm run token:jira` | `bun run token:jira` | `pnpm token:jira` |
+| **Set GitLab Token** | `npm run token:gitlab` | `bun run token:gitlab` | `pnpm token:gitlab` |
 
 ## Alur Kerja TAD
 

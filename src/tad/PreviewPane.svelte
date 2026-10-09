@@ -291,6 +291,22 @@
     list-style: none;
   }
   .page :global(span[data-tlc-user]),
+  .page :global(.confluence-user-mention) {
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+    background: #f4f5f7;
+    color: #0052cc;
+    border: 1px solid #dfe1e6;
+    padding: 1px 7px;
+    border-radius: 12px;
+    font-weight: 500;
+    font-size: 0.9em;
+    line-height: 1.4;
+    user-select: all;
+    vertical-align: baseline;
+    white-space: nowrap;
+  }
   .page :global(span[data-tlc-jira]) {
     color: #0052cc;
   }

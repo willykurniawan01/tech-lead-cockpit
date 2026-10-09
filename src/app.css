@@ -278,3 +278,34 @@ textarea.mono {
   overflow: hidden;
   clip: rect(0 0 0 0);
 }
+
+/* Atlassian-style user mention pill */
+.confluence-user-mention,
+span[data-tlc-user] {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  background: var(--surface-2, #f4f4f7);
+  color: #0052cc;
+  padding: 1px 7px;
+  border-radius: 12px;
+  font-weight: 500;
+  font-size: 0.9em;
+  line-height: 1.4;
+  user-select: all;
+  border: 1px solid var(--border, #dfe1e6);
+  vertical-align: baseline;
+  white-space: nowrap;
+}
+
+[data-theme='dark'] .confluence-user-mention,
+[data-theme='dark'] span[data-tlc-user] {
+  background: var(--surface-hover, #2a2a34);
+  color: var(--accent, #818cf8);
+  border-color: var(--border-strong, #3b3b48);
+}
+
+.confluence-user-mention:hover,
+span[data-tlc-user]:hover {
+  background: var(--surface-hover, #ececf1);
+}

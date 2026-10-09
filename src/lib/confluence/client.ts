@@ -1,5 +1,7 @@
 import type {
   AuditEvent,
+  ChangelogRequest,
+  ChangelogResponse,
   ConnectorError,
   ConnectorStatus,
   PageInfo,
@@ -45,10 +47,14 @@ export const connector = {
   pageVersion: (id: string) => call<{ version: number; when?: string; by?: string }>(`/confluence/page/version?id=${encodeURIComponent(id)}`),
   /** The page's storage at an earlier version. */
   pageAt: (id: string, version: number) => call<{ version: number; storage: string }>(`/confluence/page/at?id=${encodeURIComponent(id)}&version=${version}`),
+  /** Search users in Confluence by name/email. */
+  searchUsers: (q: string) => call<{ accountId: string; displayName: string; email?: string }[]>(`/confluence/users?q=${encodeURIComponent(q)}`),
   /** Exact display name → account id (Cloud user directory). */
   resolveUsers: (names: string[]) => call<Record<string, string>>('/confluence/users/resolve', { method: 'POST', body: JSON.stringify({ names }) }),
   preflight: (req: PreflightRequest) => call<PreflightResponse>('/confluence/preflight', { method: 'POST', body: JSON.stringify(req) }),
   publish: (req: PublishRequest) => call<PublishResponse>('/confluence/publish', { method: 'POST', body: JSON.stringify(req) }),
+  generateChangelog: (req: ChangelogRequest) =>
+    call<ChangelogResponse>('/confluence/changelog', { method: 'POST', body: JSON.stringify(req) }),
   saveToken: (req: { token: string; baseUrl?: string; email?: string }) =>
     call<{ ok: true; message: string }>('/confluence/save-token', { method: 'POST', body: JSON.stringify(req) }),
 };

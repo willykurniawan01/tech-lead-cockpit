@@ -133,7 +133,18 @@ function macrosToCanonical(block: string): string {
     .replace(/<ac:structured-macro ac:name="jira"[^>]*>([\s\S]*?)<\/ac:structured-macro>/g, (_, params: string) =>
       jiraHtml(decodeEntities(params.match(/ac:name="key">([^<]*)</)?.[1] ?? '')),
     )
-    .replace(/<ac:link><ri:user ri:account-id="([^"]*)"\s*\/><\/ac:link>/g, (_, id: string) => mentionHtml(id));
+    .replace(/<ac:link\b[\s\S]*?<ri:user\b([^>]*?)\/?>[\s\S]*?<\/ac:link>/g, (fullLink, userAttrs) => {
+      const idMatch = userAttrs.match(/ri:(?:account-id|userkey|username)="([^"]+)"/);
+      if (!idMatch) return fullLink;
+      const id = idMatch[1];
+      const nameMatch = userAttrs.match(/data-display-name="([^"]+)"/);
+      const bodyMatch = fullLink.match(/<ac:(?:plain-text-link-body|link-body)>([\s\S]*?)<\/ac:(?:plain-text-link-body|link-body)>/);
+      let name = nameMatch ? decodeEntities(nameMatch[1]) : undefined;
+      if (!name && bodyMatch) {
+        name = bodyMatch[1].replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, '$1').replace(/^@/, '').trim();
+      }
+      return mentionHtml(id, name);
+    });
 }
 
 /** Older imports kept Confluence macros (with CDATA) and real newlines inside the table HTML. */

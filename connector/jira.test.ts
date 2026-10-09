@@ -141,5 +141,42 @@ describe('Jira Connector Module', () => {
       await expect(client.currentUser()).rejects.toThrow(JiraError);
       await expect(client.currentUser()).rejects.toThrow('Token ditolak Jira (401)');
     });
+
+    it('getUser looks up user by accountId successfully', async () => {
+      const mockFetch = vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          accountId: 'acc-456',
+          displayName: 'Ridwan',
+          emailAddress: 'ridwan@example.com',
+          active: true,
+        }),
+      });
+      vi.stubGlobal('fetch', mockFetch);
+
+      const client = new JiraClient(config);
+      const user = await client.getUser('acc-456');
+
+      expect(user?.displayName).toBe('Ridwan');
+      expect(user?.accountId).toBe('acc-456');
+      expect(mockFetch).toHaveBeenCalledWith(
+        'https://acme.atlassian.net/rest/api/3/user?accountId=acc-456',
+        expect.anything(),
+      );
+    });
+
+    it('getUser returns null on failure or empty id', async () => {
+      const client = new JiraClient(config);
+      expect(await client.getUser('')).toBeNull();
+
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+        ok: false,
+        status: 404,
+        text: async () => 'Not found',
+      }));
+      expect(await client.getUser('not-found-id')).toBeNull();
+    });
   });
 });
+
