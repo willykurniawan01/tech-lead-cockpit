@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { textToAdf } from '../jira.ts';
 import { bugFixSpec, buildBugPrompt, parseBugReply } from './analysis.ts';
+import { bugTicketTitle } from '../../src/lib/bugs/types.ts';
 import { BugManager, MAX_LOG_BYTES } from './manager.ts';
 
 const reply = (over: Record<string, unknown> = {}) =>
@@ -52,13 +53,13 @@ describe('bug analysis parsing', () => {
       known,
     );
     expect(two.tasks.map((t) => [t.repo, t.profile, t.jiraSummary])).toEqual([
-      ['core-promo-ultimate', 'backend', '[BE] Reserve panic'],
-      ['web-portal', 'frontend', 'Tampilkan pesan kuota habis'],
+      ['core-promo-ultimate', 'backend', '[BACKEND][CORE-PROMO-ULTIMATE][TECH-DEBT] - Fix Reserve panic'],
+      ['web-portal', 'frontend', '[WEB-FE][WEB-PORTAL][TECH-DEBT] - Fix Tampilkan pesan kuota habis'],
     ]);
     // No tasks from the AI: one task from the overall plan.
     const one = parseBugReply(reply(), known);
     expect(one.tasks).toEqual([
-      { title: '[Promo] Reserve panic saat kuota harian habis', repo: 'core-promo-ultimate', profile: 'backend', fixPlan: 'Cek slot nil dan kembalikan ErrQuotaExhausted', testPlan: 'Test Reserve dengan kuota harian habis', jiraSummary: '[Promo] Reserve panic saat kuota harian habis', jiraDescription: 'Konteks…' },
+      { title: '[Promo] Reserve panic saat kuota harian habis', repo: 'core-promo-ultimate', profile: 'backend', fixPlan: 'Cek slot nil dan kembalikan ErrQuotaExhausted', testPlan: 'Test Reserve dengan kuota harian habis', jiraSummary: '[BACKEND][CORE-PROMO-ULTIMATE][TECH-DEBT] - Fix Reserve panic saat kuota harian habis', jiraDescription: 'Konteks…' },
     ]);
   });
 
@@ -159,7 +160,7 @@ describe('BugManager', () => {
     await expect(m.createTicket({ caseId: c.id, taskId: task.id, projectKey: 'mu', issueType: 'Bug', summary: 'x', description: '' })).rejects.toThrow('Project key');
     saved = (await m.createTicket({ caseId: c.id, taskId: task.id, projectKey: 'MU', issueType: 'Bug', summary: 'Reserve panic', description: 'desc' })).case;
     expect(saved).toMatchObject({ status: 'ticketed', tasks: [{ status: 'ticketed', jira: { key: 'MU-123' } }] });
-    expect(jiraCalls).toEqual([{ projectKey: 'MU', issueType: 'Bug', summary: 'Reserve panic', description: 'desc', priority: undefined }]);
+    expect(jiraCalls).toEqual([{ projectKey: 'MU', issueType: 'Bug', summary: '[BACKEND][CORE-PROMO-ULTIMATE][TECH-DEBT] - Fix Reserve panic', description: 'desc', priority: undefined }]);
     await expect(m.createTicket({ caseId: c.id, taskId: task.id, projectKey: 'MU', issueType: 'Bug', summary: 'again', description: '' })).rejects.toThrow('sudah punya tiket');
     await expect(m.removeTask(c.id, task.id)).rejects.toThrow('tidak bisa dihapus');
 
@@ -227,5 +228,18 @@ describe('BugManager', () => {
     await until(async () => m.job(job.id)?.status !== 'running' && (await m.get(c.id)).status !== 'analyzing');
     expect(m.job(job.id)).toMatchObject({ status: 'error', rawReply: 'maaf, tidak tahu' });
     expect((await m.get(c.id)).status).toBe('draft');
+  });
+});
+
+describe('bug ticket titles follow the task format', () => {
+  it('builds [TYPE][SERVICE][TECH-DEBT] - Fix … from the repo and its profile', () => {
+    expect(bugTicketTitle('Reserve panic saat kuota habis', 'core-promo-ultimate', 'backend')).toBe('[BACKEND][CORE-PROMO-ULTIMATE][TECH-DEBT] - Fix Reserve panic saat kuota habis');
+    expect(bugTicketTitle('[Promo] Pesan kuota tidak tampil', 'web-portal', 'frontend')).toBe('[WEB-FE][WEB-PORTAL][TECH-DEBT] - Fix Pesan kuota tidak tampil');
+    expect(bugTicketTitle('Perbaiki crash di checkout', 'mobile-app', 'frontend')).toBe('[MOBILE-FE][MOBILE-APP][TECH-DEBT] - Perbaiki crash di checkout');
+  });
+
+  it('keeps the type and name of a title already in the format, with the fix repo and TECH-DEBT', () => {
+    expect(bugTicketTitle('[BE][core-promo][PROMO-ENGINE] - Fix double reserve', 'core-promo-ultimate', 'backend')).toBe('[BACKEND][CORE-PROMO-ULTIMATE][TECH-DEBT] - Fix double reserve');
+    expect(bugTicketTitle('[WEB-FE][CMS][PROMO-ENGINE] - Hotfix filter tanggal', 'web-portal', 'frontend')).toBe('[WEB-FE][WEB-PORTAL][TECH-DEBT] - Hotfix filter tanggal');
   });
 });

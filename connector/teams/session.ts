@@ -161,6 +161,10 @@ export function buildTeamsDraftPrompt(input: BuildTeamsDraftPromptInput): string
     .join('\n');
 }
 
+/** Chat list cache: served as-is while fresh, then served while it refreshes in the background. */
+const CHATS_FRESH_MS = 60_000;
+const CHATS_STALE_MS = 15 * 60_000;
+
 class TeamsSessionManager {
   private accessToken: string | null = null;
   private accessTokenExpiresAt = 0;
@@ -176,6 +180,8 @@ class TeamsSessionManager {
   private skypeTokenExpiresAt = 0;
   private chatServiceHost = 'https://apac.ng.msg.teams.microsoft.com';
   private userCache = new Map<string, string>();
+  private chatsCache?: { at: number; value: TeamsChat[] };
+  private chatsInflight?: Promise<TeamsChat[]>;
 
   constructor() {
     this.currentTenantId = process.env.TEAMS_TENANT_ID || DEFAULT_TENANT_ID;
@@ -212,6 +218,7 @@ class TeamsSessionManager {
   }
 
   async clearAuth(): Promise<void> {
+    this.invalidateChats();
     this.accessToken = null;
     this.accessTokenExpiresAt = 0;
     this.currentUser = null;
@@ -512,7 +519,39 @@ class TeamsSessionManager {
     this.activeDeviceCodeAuth = null;
   }
 
-  async getChats(): Promise<TeamsChat[]> {
+  /**
+   * Chat list for the Teams page. Loading it means many Microsoft calls (conversations, names of
+   * 1:1 partners, teams, channels, each channel's last message), so they run in parallel and the
+   * result is cached: fresh for CHATS_FRESH_MS, then served immediately while a background refresh
+   * runs (up to CHATS_STALE_MS). `fresh` forces a reload (the refresh button).
+   */
+  async getChats(opts: { fresh?: boolean } = {}): Promise<TeamsChat[]> {
+    const cache = this.chatsCache;
+    const age = cache ? Date.now() - cache.at : Infinity;
+    if (cache && !opts.fresh && age < CHATS_FRESH_MS) return cache.value;
+    if (cache && !opts.fresh && age < CHATS_STALE_MS) {
+      void this.refreshChats().catch(() => {});
+      return cache.value;
+    }
+    return this.refreshChats();
+  }
+
+  /** Drops the cached chat list (after sending, or on logout). */
+  invalidateChats(): void {
+    this.chatsCache = undefined;
+  }
+
+  private refreshChats(): Promise<TeamsChat[]> {
+    this.chatsInflight ??= this.loadChats()
+      .then((value) => {
+        this.chatsCache = { at: Date.now(), value };
+        return value;
+      })
+      .finally(() => (this.chatsInflight = undefined));
+    return this.chatsInflight;
+  }
+
+  private async loadChats(): Promise<TeamsChat[]> {
     const token = await this.getAccessToken();
     if (!token) throw new Error('Microsoft Teams belum terhubung.');
 
@@ -522,173 +561,10 @@ class TeamsSessionManager {
     const myUserId = this.currentUser?.id;
     const myName = this.currentUser?.displayName;
 
-    const result: TeamsChat[] = [];
-    const seenIds = new Set<string>();
-
-    // 1. Fetch direct chats, group chats, meetings, and notes via Teams Chat API (Skype Spaces)
-    try {
-      const skype = await this.getSkypeSession();
-      if (skype) {
-        const convRes = await fetch(
-          `${skype.chatHost}/v1/users/ME/conversations?pageSize=50&view=msnp24Equivalent`,
-          {
-            headers: {
-              Authentication: `skypetoken=${skype.skypeToken}`,
-              BehaviorOverride: 'redirectAs404',
-              Accept: 'application/json',
-            },
-          }
-        );
-
-        if (convRes.ok) {
-          const convData = (await convRes.json()) as any;
-          const conversations = convData.conversations || [];
-
-          for (const c of conversations) {
-            const threadType = c.threadProperties?.productThreadType || c.type;
-            // Skip internal streams
-            if (['StreamOfNotifications', 'StreamOfMentions', 'StreamOfCallLogs', 'TeamsTeam'].includes(threadType)) {
-              continue;
-            }
-
-            let chatType: 'oneOnOne' | 'group' | 'meeting' | 'channel' | 'notes' | string = 'group';
-            let title = c.threadProperties?.topic || '';
-
-            if (threadType === 'OneToOneChat' || c.id.includes('@unq.gbl.spaces')) {
-              chatType = 'oneOnOne';
-              const match = c.id.match(/^19:([0-9a-f-]+)_([0-9a-f-]+)@unq\.gbl\.spaces/i);
-              let otherId: string | null = null;
-              if (match) {
-                otherId = match[1] === myUserId ? match[2] : match[1];
-              }
-
-              if (c.lastMessage?.imdisplayname && c.lastMessage.imdisplayname !== myName) {
-                title = c.lastMessage.imdisplayname;
-                if (otherId) this.userCache.set(otherId, title);
-              } else if (otherId) {
-                const resolved = await this.resolveUserDisplayName(otherId, token);
-                title = resolved || title || 'Direct Chat';
-              } else {
-                title = title || 'Direct Chat';
-              }
-            } else if (threadType === 'Meeting') {
-              chatType = 'meeting';
-              title = title || 'Meeting Chat';
-            } else if (threadType === 'StreamOfNotes' || c.id === '48:notes') {
-              chatType = 'notes';
-              title = 'Catatan Pribadi';
-            } else if (threadType === 'TeamsStandardChannel') {
-              chatType = 'channel';
-              title = title ? `#${title}` : 'Channel';
-            } else {
-              chatType = 'group';
-              title = title || 'Group Chat';
-            }
-
-            let previewText = '';
-            let senderName = '';
-            let timestamp = c.lastUpdatedDateTime || new Date(c.version || Date.now()).toISOString();
-
-            if (c.lastMessage && c.lastMessage.messagetype !== 'Event/Call') {
-              previewText = cleanHtmlText(c.lastMessage.content || '');
-              senderName = c.lastMessage.imdisplayname || '';
-              if (c.lastMessage.composetime) {
-                timestamp = c.lastMessage.composetime;
-              }
-            }
-
-            const detectedMRs = extractMRUrls(previewText);
-
-            result.push({
-              id: c.id,
-              title,
-              chatType,
-              lastUpdatedDateTime: timestamp,
-              lastMessage: previewText
-                ? {
-                    preview: previewText.slice(0, 100),
-                    sender: senderName,
-                    timestamp,
-                  }
-                : undefined,
-              detectedMRs: detectedMRs.length > 0 ? detectedMRs : undefined,
-            });
-            seenIds.add(c.id);
-          }
-        }
-      }
-    } catch {
-      // Skype Spaces fetch blip, continue
-    }
-
-    // 2. Fetch Teams and Channels via Microsoft Graph API (ChannelMessage.Read.All is pre-authorized)
-    try {
-      const teamsRes = await fetch('https://graph.microsoft.com/v1.0/me/joinedTeams', {
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      if (teamsRes.ok) {
-        const teamsData = (await teamsRes.json()) as any;
-        const teams = teamsData.value || [];
-
-        for (const t of teams) {
-          try {
-            const chRes = await fetch(`https://graph.microsoft.com/v1.0/teams/${t.id}/channels`, {
-              headers: { Authorization: `Bearer ${token}` },
-            });
-            if (!chRes.ok) continue;
-            const chData = (await chRes.json()) as any;
-            const channels = chData.value || [];
-
-            for (const ch of channels) {
-              const channelChatId = `channel:${t.id}:${ch.id}`;
-              if (seenIds.has(channelChatId) || seenIds.has(ch.id)) continue;
-
-              let lastMsgPreview: { preview: string; sender: string; timestamp: string } | undefined;
-              let detectedMRs: string[] = [];
-
-              try {
-                const msgRes = await fetch(
-                  `https://graph.microsoft.com/v1.0/teams/${t.id}/channels/${encodeURIComponent(ch.id)}/messages?$top=1`,
-                  { headers: { Authorization: `Bearer ${token}` } }
-                );
-                if (msgRes.ok) {
-                  const msgData = (await msgRes.json()) as any;
-                  const firstMsg = msgData.value?.[0];
-                  if (firstMsg && firstMsg.body?.content) {
-                    const previewText = cleanHtmlText(firstMsg.body.content);
-                    const senderName = firstMsg.from?.user?.displayName || 'System';
-                    if (previewText && previewText !== '<systemEventMessage/>') {
-                      lastMsgPreview = {
-                        preview: previewText.slice(0, 100),
-                        sender: senderName,
-                        timestamp: firstMsg.createdDateTime,
-                      };
-                      detectedMRs = extractMRUrls(previewText);
-                    }
-                  }
-                }
-              } catch {
-                // ignore channel message preview blip
-              }
-
-              result.push({
-                id: channelChatId,
-                title: `[${t.displayName}] #${ch.displayName}`,
-                chatType: 'channel',
-                lastUpdatedDateTime: lastMsgPreview?.timestamp || ch.createdDateTime || new Date().toISOString(),
-                lastMessage: lastMsgPreview,
-                detectedMRs: detectedMRs.length > 0 ? detectedMRs : undefined,
-              });
-              seenIds.add(channelChatId);
-            }
-          } catch {
-            // Channel fetch blip
-          }
-        }
-      }
-    } catch {
-      // Teams fetch error
-    }
+    // Chats (Teams chat service) and channels (Graph) are independent: load both at once.
+    const [direct, channels] = await Promise.all([this.loadConversations(token, myUserId, myName), this.loadChannels(token)]);
+    const seen = new Set(direct.map((c) => c.id));
+    const result = [...direct, ...channels.filter((c) => !seen.has(c.id) && !seen.has(c.rawChannelId)).map(({ rawChannelId: _r, ...c }) => c)];
 
     // Sort all chats by last updated date descending
     result.sort((a, b) => {
@@ -698,6 +574,148 @@ class TeamsSessionManager {
     });
 
     return result;
+  }
+
+  /** Direct chats, group chats, meetings and notes via the Teams chat service (Skype Spaces). */
+  private async loadConversations(token: string, myUserId: string | undefined, myName: string | undefined): Promise<TeamsChat[]> {
+    try {
+      const skype = await this.getSkypeSession();
+      if (!skype) return [];
+      const convRes = await fetch(`${skype.chatHost}/v1/users/ME/conversations?pageSize=50&view=msnp24Equivalent`, {
+        headers: {
+          Authentication: `skypetoken=${skype.skypeToken}`,
+          BehaviorOverride: 'redirectAs404',
+          Accept: 'application/json',
+        },
+      });
+      if (!convRes.ok) return [];
+      const convData = (await convRes.json()) as any;
+      const conversations = (convData.conversations || []).filter((c: any) => {
+        const threadType = c.threadProperties?.productThreadType || c.type;
+        // Skip internal streams
+        return !['StreamOfNotifications', 'StreamOfMentions', 'StreamOfCallLogs', 'TeamsTeam'].includes(threadType);
+      });
+
+      // Names of 1:1 partners not in the last message are looked up in parallel.
+      return await Promise.all(
+        conversations.map(async (c: any): Promise<TeamsChat> => {
+          const threadType = c.threadProperties?.productThreadType || c.type;
+          let chatType: 'oneOnOne' | 'group' | 'meeting' | 'channel' | 'notes' | string = 'group';
+          let title = c.threadProperties?.topic || '';
+
+          if (threadType === 'OneToOneChat' || c.id.includes('@unq.gbl.spaces')) {
+            chatType = 'oneOnOne';
+            const match = c.id.match(/^19:([0-9a-f-]+)_([0-9a-f-]+)@unq\.gbl\.spaces/i);
+            let otherId: string | null = null;
+            if (match) {
+              otherId = match[1] === myUserId ? match[2] : match[1];
+            }
+
+            if (c.lastMessage?.imdisplayname && c.lastMessage.imdisplayname !== myName) {
+              title = c.lastMessage.imdisplayname;
+              if (otherId) this.userCache.set(otherId, title);
+            } else if (otherId) {
+              const resolved = await this.resolveUserDisplayName(otherId, token);
+              title = resolved || title || 'Direct Chat';
+            } else {
+              title = title || 'Direct Chat';
+            }
+          } else if (threadType === 'Meeting') {
+            chatType = 'meeting';
+            title = title || 'Meeting Chat';
+          } else if (threadType === 'StreamOfNotes' || c.id === '48:notes') {
+            chatType = 'notes';
+            title = 'Catatan Pribadi';
+          } else if (threadType === 'TeamsStandardChannel') {
+            chatType = 'channel';
+            title = title ? `#${title}` : 'Channel';
+          } else {
+            chatType = 'group';
+            title = title || 'Group Chat';
+          }
+
+          let previewText = '';
+          let senderName = '';
+          let timestamp = c.lastUpdatedDateTime || new Date(c.version || Date.now()).toISOString();
+
+          if (c.lastMessage && c.lastMessage.messagetype !== 'Event/Call') {
+            previewText = cleanHtmlText(c.lastMessage.content || '');
+            senderName = c.lastMessage.imdisplayname || '';
+            if (c.lastMessage.composetime) {
+              timestamp = c.lastMessage.composetime;
+            }
+          }
+
+          const detectedMRs = extractMRUrls(previewText);
+          return {
+            id: c.id,
+            title,
+            chatType,
+            lastUpdatedDateTime: timestamp,
+            lastMessage: previewText ? { preview: previewText.slice(0, 100), sender: senderName, timestamp } : undefined,
+            detectedMRs: detectedMRs.length > 0 ? detectedMRs : undefined,
+          };
+        }),
+      );
+    } catch {
+      // Skype Spaces fetch blip
+      return [];
+    }
+  }
+
+  /** Channels of the user's teams via Microsoft Graph, each with its last message; all in parallel. */
+  private async loadChannels(token: string): Promise<(TeamsChat & { rawChannelId: string })[]> {
+    const graph = (path: string) => fetch(`https://graph.microsoft.com/v1.0${path}`, { headers: { Authorization: `Bearer ${token}` } });
+    try {
+      const teamsRes = await graph('/me/joinedTeams');
+      if (!teamsRes.ok) return [];
+      const teams = ((await teamsRes.json()) as any).value || [];
+      const perTeam = await Promise.all(
+        teams.map(async (t: any) => {
+          try {
+            const chRes = await graph(`/teams/${t.id}/channels`);
+            if (!chRes.ok) return [];
+            const channels = ((await chRes.json()) as any).value || [];
+            return await Promise.all(
+              channels.map(async (ch: any) => {
+                let lastMsgPreview: { preview: string; sender: string; timestamp: string } | undefined;
+                let detectedMRs: string[] = [];
+                try {
+                  const msgRes = await graph(`/teams/${t.id}/channels/${encodeURIComponent(ch.id)}/messages?$top=1`);
+                  if (msgRes.ok) {
+                    const firstMsg = ((await msgRes.json()) as any).value?.[0];
+                    if (firstMsg && firstMsg.body?.content) {
+                      const previewText = cleanHtmlText(firstMsg.body.content);
+                      const senderName = firstMsg.from?.user?.displayName || 'System';
+                      if (previewText && previewText !== '<systemEventMessage/>') {
+                        lastMsgPreview = { preview: previewText.slice(0, 100), sender: senderName, timestamp: firstMsg.createdDateTime };
+                        detectedMRs = extractMRUrls(previewText);
+                      }
+                    }
+                  }
+                } catch {
+                  // ignore channel message preview blip
+                }
+                return {
+                  id: `channel:${t.id}:${ch.id}`,
+                  rawChannelId: ch.id as string,
+                  title: `[${t.displayName}] #${ch.displayName}`,
+                  chatType: 'channel',
+                  lastUpdatedDateTime: lastMsgPreview?.timestamp || ch.createdDateTime || new Date().toISOString(),
+                  lastMessage: lastMsgPreview,
+                  detectedMRs: detectedMRs.length > 0 ? detectedMRs : undefined,
+                };
+              }),
+            );
+          } catch {
+            return []; // Channel fetch blip
+          }
+        }),
+      );
+      return perTeam.flat();
+    } catch {
+      return []; // Teams fetch error
+    }
   }
 
   async getMessages(chatId: string): Promise<TeamsMessage[]> {
@@ -820,6 +838,7 @@ class TeamsSessionManager {
   }
 
   async sendMessage(chatId: string, content: string, attachment?: TeamsAttachmentInput): Promise<{ ok: true; id: string }> {
+    this.invalidateChats(); // the chat's last message changes
     const token = await this.getAccessToken();
     if (!token) throw new Error('Microsoft Teams belum terhubung.');
 

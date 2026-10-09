@@ -1692,7 +1692,7 @@ async function handleTeams(route: string, url: URL, req: IncomingMessage, res: S
   }
   if (route === 'GET /teams/chats') {
     try {
-      return send(res, 200, await teamsSession.getChats());
+      return send(res, 200, await teamsSession.getChats({ fresh: url.searchParams.get('fresh') === '1' }));
     } catch (e) {
       throw new ConfluenceError((e as Error).message, 502, 'upstream');
     }

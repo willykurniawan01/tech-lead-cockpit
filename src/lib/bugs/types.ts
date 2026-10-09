@@ -4,6 +4,7 @@
 // the Tech Lead turns each task into a Jira ticket and lets a coding agent fix it (test first).
 
 import type { AiSelection } from '../ai/types';
+import { formatTaskTitle, parseTaskTitle, type TaskType } from '../tad/template';
 
 export type BugStatus = 'draft' | 'analyzing' | 'analyzed' | 'ticketed' | 'fixing' | 'fixed';
 export type BugSeverity = 'critical' | 'high' | 'medium' | 'low';
@@ -152,6 +153,32 @@ export const TASK_STATUS_LABELS: Record<BugTaskStatus, string> = {
 };
 
 /** A web portal/CMS or app repo is frontend work; everything else backend. */
+/** CODENAME of every bug-fix ticket (the team files bug fixes under tech debt). */
+export const BUGFIX_CODENAME = 'TECH-DEBT';
+
+const tag = (v: string) => v.trim().toUpperCase().replace(/[^A-Z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+
+/** Task type of a fix in this repo: BACKEND, or MOBILE-FE / WEB-FE for front ends. */
+export function bugTaskType(repo: string, profile: BugAgentProfile): TaskType {
+  if (profile === 'backend') return 'BACKEND';
+  return /mobile|android|ios|flutter|\bapp\b|-app\b|app-/i.test(repo) ? 'MOBILE-FE' : 'WEB-FE';
+}
+
+/**
+ * A bug ticket title in the team's task format, `[TYPE][SERVICE][TECH-DEBT] - Fix …`: TYPE from
+ * the repo's profile, SERVICE = the repo the fix goes to, CODENAME always TECH-DEBT. A title
+ * already in the format keeps its type and name.
+ */
+export function bugTicketTitle(summary: string, repo: string, profile: BugAgentProfile): string {
+  const parsed = parseTaskTitle(summary);
+  const type = parsed?.normalizedType ?? bugTaskType(repo, profile);
+  const service = tag(repo) || tag(parsed?.service ?? '') || 'SERVICE';
+  const code = BUGFIX_CODENAME;
+  let name = (parsed?.name ?? summary.replace(/^(\s*\[[^\]]*\])+\s*[-–—:]?\s*/, '')).trim() || 'Perbaikan bug';
+  if (!/^(fix|hotfix|bugfix|perbaik)/i.test(name)) name = `Fix ${name}`;
+  return formatTaskTitle(type, service, code, name).slice(0, 250);
+}
+
 export function profileForRepo(repo: string): BugAgentProfile {
   return /portal|cms|web|frontend|fe-|-fe\b|dashboard|app\b|mobile/i.test(repo) ? 'frontend' : 'backend';
 }

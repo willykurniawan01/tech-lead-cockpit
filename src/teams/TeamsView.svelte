@@ -1,9 +1,20 @@
+<script lang="ts" module>
+  import type { TeamsStatus as CachedStatus, TeamsChat as CachedChat, TeamsMessage as CachedMessage } from '../lib/teams/types';
+
+  /**
+   * Last loaded Teams data, kept while the app runs: reopening the page shows it at once and
+   * refreshes in the background instead of loading everything again.
+   */
+  const cache: { status?: CachedStatus; chats?: CachedChat[]; selectedChatId?: string | null; messages: Map<string, CachedMessage[]> } = { messages: new Map() };
+</script>
+
 <script lang="ts">
   import Icon from '../components/Icon.svelte';
   import AiPicker from '../components/AiPicker.svelte';
   import { confirmDialog } from '../components/confirm.svelte';
   import { toasts } from '../components/toast.svelte';
   import { teams } from '../lib/teams/client';
+  import { connectorDownMessage } from '../lib/api-base';
   import { TEAMS_TONES, type TeamsStatus, type TeamsChat, type TeamsMessage, type TeamsTone } from '../lib/teams/types';
   import type { AiSelection } from '../lib/ai/types';
   import TeamsConnectPanel from './TeamsConnectPanel.svelte';
@@ -32,12 +43,12 @@
     return 'casual';
   }
 
-  let status = $state<TeamsStatus | null>(null);
-  let loadingStatus = $state(true);
-  let chats = $state<TeamsChat[]>([]);
+  let status = $state<TeamsStatus | null>(cache.status ?? null);
+  let loadingStatus = $state(!cache.status);
+  let chats = $state<TeamsChat[]>(cache.chats ?? []);
   let loadingChats = $state(false);
-  let selectedChatId = $state<string | null>(null);
-  let messages = $state<TeamsMessage[]>([]);
+  let selectedChatId = $state<string | null>(cache.selectedChatId ?? null);
+  let messages = $state<TeamsMessage[]>((cache.selectedChatId && cache.messages.get(cache.selectedChatId)) || []);
   let loadingMessages = $state(false);
   let searchQuery = $state('');
   type ChatFilterCategory = 'all' | 'oneOnOne' | 'channel' | 'group' | 'mr';
@@ -174,49 +185,86 @@
     checkStatus();
   });
 
+  // The status check is quick; the chat list loads on its own afterwards, so the page never
+  // waits on it (and shows the last list at once when it was opened before).
   async function checkStatus() {
-    loadingStatus = true;
+    if (!status) loadingStatus = true;
     try {
       status = await teams.status();
-      if (status.connected) {
-        await loadChats();
-      }
+      cache.status = status;
     } catch (e: any) {
       status = { connected: false, error: e.message, tenantId: '', clientId: '' };
     } finally {
       loadingStatus = false;
     }
+    if (status?.connected) void loadChats();
   }
 
-  async function loadChats() {
+  /**
+   * Retries while the connector is briefly unreachable (e.g. the dev server restarting after a
+   * code change), so a short blip doesn't end in an error.
+   */
+  async function retrying<T>(fn: () => Promise<T>, attempts = 4): Promise<T> {
+    for (let i = 1; ; i++) {
+      try {
+        return await fn();
+      } catch (e) {
+        const unreachable = (e as Error).message === connectorDownMessage();
+        if (!unreachable || i >= attempts) throw e;
+        await new Promise((r) => setTimeout(r, 800 * i));
+      }
+    }
+  }
+
+  async function loadChats(fresh = false) {
     loadingChats = true;
+    const hadChats = chats.length > 0;
     try {
-      chats = await teams.chats();
+      chats = await retrying(() => teams.chats(fresh));
+      cache.chats = chats;
       if (!selectedChatId && chats.length > 0) {
         selectChat(chats[0].id);
+      } else if (selectedChatId) {
+        void loadMessages(selectedChatId);
       }
     } catch (e: any) {
-      toasts.show(`Gagal memuat daftar chat: ${e.message}`, 'err');
+      // A background refresh that fails keeps the list on screen; only a first load (or the
+      // refresh button) reports it.
+      if (!hadChats || fresh) toasts.show(`Gagal memuat daftar chat: ${e.message}`, 'err');
     } finally {
       loadingChats = false;
     }
   }
 
+  /** Loads a chat's messages; cached ones are shown meanwhile. */
+  async function loadMessages(id: string, manual = false) {
+    loadingMessages = true;
+    const hadMessages = selectedChatId === id && messages.length > 0;
+    try {
+      const fresh = await retrying(() => teams.messages(id));
+      cache.messages.set(id, fresh);
+      if (selectedChatId === id) {
+        const grew = fresh.length !== messages.length;
+        messages = fresh;
+        if (grew) scrollToBottom();
+      }
+    } catch (e: any) {
+      if (selectedChatId === id && (!hadMessages || manual)) toasts.show(`Gagal memuat pesan: ${e.message}`, 'err');
+    } finally {
+      if (selectedChatId === id) loadingMessages = false;
+    }
+  }
+
   async function selectChat(id: string) {
     selectedChatId = id;
-    loadingMessages = true;
+    cache.selectedChatId = id;
     mrPanelOpen = false;
     replyText = '';
     aiInstruction = '';
     attachment = null;
-    try {
-      messages = await teams.messages(id);
-      scrollToBottom();
-    } catch (e: any) {
-      toasts.show(`Gagal memuat pesan: ${e.message}`, 'err');
-    } finally {
-      loadingMessages = false;
-    }
+    messages = cache.messages.get(id) ?? [];
+    if (messages.length) scrollToBottom();
+    await loadMessages(id);
   }
 
   function scrollToBottom() {
@@ -268,6 +316,7 @@
       toasts.show('Pesan terkirim ke Microsoft Teams!', 'ok');
       // Refresh messages
       messages = await teams.messages(selectedChatId);
+      cache.messages.set(selectedChatId, messages);
       scrollToBottom();
     } catch (e: any) {
       toasts.show(`Gagal mengirim pesan: ${e.message}`, 'err');
@@ -428,7 +477,7 @@
             <h2>Chat Teams</h2>
             <span class="count">{chats.length}</span>
             <span class="spacer"></span>
-            <button class="icon-btn" title="Muat ulang daftar chat" onclick={loadChats} disabled={loadingChats}>
+            <button class="icon-btn" title="Muat ulang daftar chat" onclick={() => loadChats(true)} disabled={loadingChats}>
               <Icon name="refresh" size={16} />
             </button>
             <button class="icon-btn" title="Putuskan koneksi ({status.user?.email ?? ''})" onclick={handleLogout}>
@@ -529,7 +578,7 @@
                 <span class="chev" class:up={mrPanelOpen}><Icon name="chevron" size={13} /></span>
               </button>
             {/if}
-            <button class="icon-btn" onclick={() => selectChat(activeChat.id)} disabled={loadingMessages} title="Muat ulang pesan">
+            <button class="icon-btn" onclick={() => loadMessages(activeChat.id, true)} disabled={loadingMessages} title="Muat ulang pesan">
               <Icon name="refresh" size={16} />
             </button>
           </header>

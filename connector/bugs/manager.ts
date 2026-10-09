@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { AiSelection } from '../../src/lib/ai/types.ts';
-import { profileForRepo, type BugAnalysis, type BugAnalyzeRequest, type BugCase, type BugCaseInput, type BugJob, type BugTask, type BugTaskProposal, type BugTaskStatus, type BugTicketRequest } from '../../src/lib/bugs/types.ts';
+import { bugTicketTitle, profileForRepo, type BugAnalysis, type BugAnalyzeRequest, type BugCase, type BugCaseInput, type BugJob, type BugTask, type BugTaskProposal, type BugTaskStatus, type BugTicketRequest } from '../../src/lib/bugs/types.ts';
 import { buildBugPrompt, parseBugReply } from './analysis.ts';
 import { logExcerpt, redactLog } from './redact.ts';
 import { DATA_DIR } from '../paths.ts';
@@ -61,14 +61,16 @@ function cleanTask(raw: Partial<BugTaskProposal>, base?: BugTaskProposal): BugTa
   if (!/^[A-Za-z0-9._-]{1,100}$/.test(repo)) throw new BugInputError('Repo task harus nama folder service.');
   const title = clean(raw.title ?? base?.title, 160);
   if (!title) throw new BugInputError('Judul task wajib diisi.');
-  const profile = raw.profile ?? base?.profile;
+  const p = raw.profile ?? base?.profile;
+  const profile = p === 'frontend' || p === 'backend' ? p : profileForRepo(repo);
   return {
     title,
     repo,
-    profile: profile === 'frontend' || profile === 'backend' ? profile : profileForRepo(repo),
+    profile,
     fixPlan: clean(raw.fixPlan ?? base?.fixPlan, 6_000),
     testPlan: clean(raw.testPlan ?? base?.testPlan, 4_000),
-    jiraSummary: clean(raw.jiraSummary ?? base?.jiraSummary, 120) || title.slice(0, 120),
+    // Ticket titles follow the team's task format; the service follows the repo if it changes.
+    jiraSummary: bugTicketTitle(clean(raw.jiraSummary ?? base?.jiraSummary, 250) || title, repo, profile),
     jiraDescription: clean(raw.jiraDescription ?? base?.jiraDescription, 12_000),
   };
 }
@@ -145,6 +147,8 @@ export class BugManager {
       if (first && c.coderRunIds?.length) Object.assign(first, { coderRunIds: [...c.coderRunIds], status: c.status === 'fixed' ? 'fixed' : 'fixing' });
     }
     c.coderRunIds ??= [];
+    // Proposals made before titles followed the task format get it too (tickets already filed keep theirs).
+    for (const t of c.tasks) if (!t.jira) t.jiraSummary = bugTicketTitle(t.jiraSummary || t.title, t.repo, t.profile);
     if (c.status === 'analyzing' && ![...this.jobs.values()].some((j) => j.caseId === c.id && j.status === 'running')) c.status = c.analysis ? 'analyzed' : 'draft';
     if (c.status !== 'analyzing') c.status = deriveStatus(c);
     return c;
@@ -378,7 +382,7 @@ export class BugManager {
     const projectKey = clean(req.projectKey, 10);
     if (!/^[A-Z][A-Z0-9]{1,9}$/.test(projectKey)) throw new BugInputError('Project key Jira tidak valid.');
     const issueType = clean(req.issueType, 60);
-    const summary = clean(req.summary, 250);
+    const summary = clean(req.summary, 250) && bugTicketTitle(clean(req.summary, 250), t.repo, t.profile);
     if (!issueType || !summary) throw new BugInputError('Tipe dan judul tiket wajib diisi.');
     const jira = await this.deps.jira?.();
     if (!jira) throw new BugInputError('Jira belum dikonfigurasi (menu Koneksi).');

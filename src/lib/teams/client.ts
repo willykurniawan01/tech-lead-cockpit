@@ -32,7 +32,8 @@ export const teams = {
   login: (tenantId?: string, clientId?: string) => post<TeamsDeviceCodeAuth>('/login', { tenantId, clientId }),
   cancelLogin: () => post<{ ok: true }>('/login/cancel'),
   logout: () => post<TeamsStatus>('/logout'),
-  chats: () => call<TeamsChat[]>('/chats'),
+  /** Cached by the connector for a minute; `fresh` forces a reload from Microsoft. */
+  chats: (fresh = false) => call<TeamsChat[]>(fresh ? '/chats?fresh=1' : '/chats'),
   messages: (chatId: string) => call<TeamsMessage[]>(`/messages?chatId=${encodeURIComponent(chatId)}`),
   send: (req: TeamsSendRequest) => post<{ ok: true; id: string }>('/send', req),
   draft: (req: TeamsDraftRequest) => post<TeamsDraftResponse>('/draft', req),

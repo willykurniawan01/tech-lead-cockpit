@@ -1,4 +1,4 @@
-import { profileForRepo, type BugAnalysis, type BugCase, type BugEvidence, type BugSeverity, type BugTask, type BugTaskProposal, type Confidence } from '../../src/lib/bugs/types.ts';
+import { bugTicketTitle, profileForRepo, type BugAnalysis, type BugCase, type BugEvidence, type BugSeverity, type BugTask, type BugTaskProposal, type Confidence } from '../../src/lib/bugs/types.ts';
 
 /**
  * Prompt and parser for the bug trace. The AI reads the report, the redacted logs (in logs/ of
@@ -19,10 +19,11 @@ export function buildBugPrompt(c: BugCase, opts: { servicesRoot?: string; logExc
     '- Bedakan fakta (terlihat di log/kode) dan dugaan. Jika bukti tidak cukup, katakan di openQuestions, jangan mengarang.',
     '- Rencana fix harus minimal dan spesifik (file/fungsi yang diubah), plus test reproduksi yang gagal sebelum fix dan lulus sesudahnya.',
     '- Pecah perbaikan menjadi "tasks": SATU task per service/repo yang perlu diubah (mis. fix di backend + penyesuaian di portal FE = 2 task). Bila hanya satu repo yang perlu diubah, cukup satu task. Tiap task punya rencana fix dan test sendiri, serta judul & deskripsi tiket Jira yang bisa berdiri sendiri.',
+    '- Judul tiket (jiraSummary tiap task) WAJIB mengikuti format task tim: "[TYPE][SERVICE][TECH-DEBT] - Fix <ringkasan>". TYPE: BACKEND, WEB-FE (portal/CMS/web), atau MOBILE-FE (aplikasi mobile). SERVICE: nama folder repo task itu dalam huruf besar. CODENAME untuk bug fix selalu TECH-DEBT.',
     '- Tulis dalam Bahasa Indonesia.',
     '',
     'Jawab HANYA dengan satu objek JSON valid (tanpa markdown fence):',
-    '{"summary":"ringkas 1-2 kalimat","rootCause":"penjelasan akar masalah","confidence":"high|medium|low","severity":"critical|high|medium|low","services":["folder-service"],"repo":"folder-service utama yang perlu diperbaiki","evidence":[{"file":"folder-service/path/file.go","line":123,"note":"apa yang salah di sini"}],"logSignals":["baris log kunci"],"fixPlan":"ringkasan perbaikan keseluruhan","testPlan":"ringkasan test","openQuestions":["hal yang perlu dikonfirmasi"],"jiraSummary":"judul bug keseluruhan (maks 120 karakter)","jiraDescription":"konteks bug keseluruhan","tasks":[{"title":"judul task singkat","repo":"folder-service","profile":"backend|frontend","fixPlan":"langkah perbaikan di repo ini","testPlan":"test reproduksi & regresi di repo ini","jiraSummary":"judul tiket task (maks 120 karakter)","jiraDescription":"deskripsi tiket: konteks, langkah reproduksi, expected/actual, root cause, rencana fix & test untuk repo ini"}]}',
+    '{"summary":"ringkas 1-2 kalimat","rootCause":"penjelasan akar masalah","confidence":"high|medium|low","severity":"critical|high|medium|low","services":["folder-service"],"repo":"folder-service utama yang perlu diperbaiki","evidence":[{"file":"folder-service/path/file.go","line":123,"note":"apa yang salah di sini"}],"logSignals":["baris log kunci"],"fixPlan":"ringkasan perbaikan keseluruhan","testPlan":"ringkasan test","openQuestions":["hal yang perlu dikonfirmasi"],"jiraSummary":"judul bug keseluruhan (maks 120 karakter)","jiraDescription":"konteks bug keseluruhan","tasks":[{"title":"judul task singkat","repo":"folder-service","profile":"backend|frontend","fixPlan":"langkah perbaikan di repo ini","testPlan":"test reproduksi & regresi di repo ini","jiraSummary":"[TYPE][SERVICE][TECH-DEBT] - Fix ... (maks 120 karakter)","jiraDescription":"deskripsi tiket: konteks, langkah reproduksi, expected/actual, root cause, rencana fix & test untuk repo ini"}]}',
     '',
     '## Laporan bug',
     `Judul: ${c.title}`,
@@ -59,13 +60,14 @@ function parseTasks(raw: unknown, known: Set<string>, fallback: BugTaskProposal 
     const fixPlan = str(r.fixPlan, 6_000);
     if (!fixPlan) continue;
     const title = str(r.title, 160) || str(r.jiraSummary, 160) || `Perbaikan di ${repo}`;
+    const profile = r.profile === 'frontend' || r.profile === 'backend' ? r.profile : profileForRepo(repo);
     tasks.push({
       title,
       repo,
-      profile: r.profile === 'frontend' || r.profile === 'backend' ? r.profile : profileForRepo(repo),
+      profile,
       fixPlan,
       testPlan: str(r.testPlan, 4_000),
-      jiraSummary: str(r.jiraSummary, 120) || title.slice(0, 120),
+      jiraSummary: bugTicketTitle(str(r.jiraSummary, 250) || title, repo, profile),
       jiraDescription: str(r.jiraDescription, 12_000),
     });
     if (tasks.length >= MAX_TASKS) break;
@@ -105,7 +107,10 @@ export function parseBugReply(reply: string, knownServices: string[]): Omit<BugA
   const testPlan = str(j.testPlan, 4_000);
   const jiraSummary = str(j.jiraSummary, 120) || str(j.summary, 120);
   const jiraDescription = str(j.jiraDescription, 12_000);
-  const fallback = mainRepo && fixPlan ? { title: jiraSummary || `Perbaikan di ${mainRepo}`, repo: mainRepo, profile: profileForRepo(mainRepo), fixPlan, testPlan, jiraSummary, jiraDescription } : undefined;
+  const fallback =
+    mainRepo && fixPlan
+      ? { title: jiraSummary || `Perbaikan di ${mainRepo}`, repo: mainRepo, profile: profileForRepo(mainRepo), fixPlan, testPlan, jiraSummary: bugTicketTitle(jiraSummary || `Perbaikan di ${mainRepo}`, mainRepo, profileForRepo(mainRepo)), jiraDescription }
+      : undefined;
   return {
     summary: str(j.summary, 600) || rootCause.slice(0, 200),
     rootCause,
