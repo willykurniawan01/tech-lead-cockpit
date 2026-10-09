@@ -1,0 +1,38 @@
+# OS / editor
+.DS_Store
+.idea/
+.vscode/*
+!.vscode/extensions.json
+
+# Node / Svelte
+node_modules/
+dist/
+dist-connector/
+dist-reporter/
+build/
+.svelte-kit/
+*.log
+
+# Rust / Tauri
+target/
+src-tauri/gen/
+
+# Go
+/bin/
+*.test
+*.out
+
+# Secrets & local config — tokens live in OS Keychain, never in files
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+
+# Local data (metadata cache, audit DB, diff/AI scratch)
+*.sqlite
+*.sqlite3
+*.db
+.cache/
+tmp/

@@ -1,0 +1,86 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <defs>
+    <!-- Deep midnight canvas -->
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#1c1942" />
+      <stop offset="40%" stop-color="#121028" />
+      <stop offset="100%" stop-color="#070611" />
+    </linearGradient>
+
+    <!-- Apple HIG rim highlight -->
+    <linearGradient id="rimGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#ffffff" stop-opacity="0.25" />
+      <stop offset="30%" stop-color="#818cf8" stop-opacity="0.12" />
+      <stop offset="70%" stop-color="#ffffff" stop-opacity="0.03" />
+      <stop offset="100%" stop-color="#ffffff" stop-opacity="0.01" />
+    </linearGradient>
+
+    <!-- Center radial glow -->
+    <radialGradient id="centerGlow" cx="50%" cy="47%" r="48%">
+      <stop offset="0%" stop-color="#4f46e5" stop-opacity="0.5" />
+      <stop offset="50%" stop-color="#3730a3" stop-opacity="0.18" />
+      <stop offset="100%" stop-color="#000000" stop-opacity="0" />
+    </radialGradient>
+
+    <!-- Subtle diagonal gloss sheen -->
+    <linearGradient id="glossGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#ffffff" stop-opacity="0.08" />
+      <stop offset="35%" stop-color="#ffffff" stop-opacity="0.03" />
+      <stop offset="60%" stop-color="#ffffff" stop-opacity="0" />
+    </linearGradient>
+
+    <!-- Upper chevron gradient -->
+    <linearGradient id="upperChevGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#6366f1" />
+      <stop offset="50%" stop-color="#818cf8" />
+      <stop offset="100%" stop-color="#a855f7" />
+    </linearGradient>
+
+    <!-- Horizon bar gradient -->
+    <linearGradient id="horizonGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#4f46e5" stop-opacity="0.05" />
+      <stop offset="20%" stop-color="#6366f1" stop-opacity="0.85" />
+      <stop offset="50%" stop-color="#38bdf8" stop-opacity="1" />
+      <stop offset="80%" stop-color="#6366f1" stop-opacity="0.85" />
+      <stop offset="100%" stop-color="#4f46e5" stop-opacity="0.05" />
+    </linearGradient>
+
+    <!-- Squircle Drop Shadow -->
+    <filter id="squircleShadow" x="-15%" y="-15%" width="130%" height="130%">
+      <feDropShadow dx="0" dy="26" stdDeviation="28" flood-color="#000000" flood-opacity="0.45" />
+      <feDropShadow dx="0" dy="8" stdDeviation="10" flood-color="#000000" flood-opacity="0.3" />
+    </filter>
+
+    <!-- Crisp symbol glow -->
+    <filter id="symbolGlow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="0" stdDeviation="12" flood-color="#6366f1" flood-opacity="0.5" />
+    </filter>
+  </defs>
+
+  <!-- Squircle Base with Shadow -->
+  <rect x="100" y="100" width="824" height="824" rx="185" fill="url(#bgGrad)" filter="url(#squircleShadow)" />
+
+  <!-- Center Backlight -->
+  <rect x="100" y="100" width="824" height="824" rx="185" fill="url(#centerGlow)" />
+
+  <!-- Diagonal Gloss Sheen -->
+  <path d="M 100 285 C 100 183 183 100 285 100 L 739 100 C 841 100 924 183 924 285 L 924 380 L 100 700 Z" fill="url(#glossGrad)" />
+
+  <!-- Inner Stroke Rim -->
+  <rect x="101.5" y="101.5" width="821" height="821" rx="183.5" fill="none" stroke="url(#rimGrad)" stroke-width="3" />
+
+  <!-- Horizon Bar -->
+  <rect x="256" y="534" width="512" height="12" rx="6" fill="url(#horizonGrad)" />
+
+  <!-- Upper Velocity Chevron -->
+  <path d="M 405 408 L 512 308 L 619 408" fill="none" stroke="url(#upperChevGrad)" stroke-width="32" stroke-linecap="round" stroke-linejoin="round" />
+
+  <!-- Primary Flight Director Chevron -->
+  <path d="M 350 550 L 512 400 L 674 550" fill="none" stroke="#ffffff" stroke-width="40" stroke-linecap="round" stroke-linejoin="round" filter="url(#symbolGlow)" />
+
+  <!-- Cockpit Telemetry Node Cluster -->
+  <circle cx="512" cy="630" r="13" fill="#ffffff" filter="url(#symbolGlow)" />
+  <circle cx="448" cy="602" r="10" fill="#38bdf8" opacity="0.9" />
+  <circle cx="576" cy="602" r="10" fill="#38bdf8" opacity="0.9" />
+  <circle cx="512" cy="682" r="7.5" fill="#818cf8" opacity="0.75" />
+</svg>

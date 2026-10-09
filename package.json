@@ -1,0 +1,46 @@
+{
+  "name": "tech-lead-cockpit",
+  "private": true,
+  "version": "0.1.2",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "dev:fresh": "TLC_PROFILE=test TLC_REMOTE_PORT=5185 vite --port 5180",
+    "build": "vite build",
+    "preview": "vite preview",
+    "check": "svelte-check --tsconfig ./tsconfig.json",
+    "test": "vitest run",
+    "tauri": "tauri",
+    "build:desktop": "tauri build",
+    "dev:desktop": "tauri dev",
+    "build:connector": "vite build -c vite.connector.config.ts",
+    "connector": "npm run build:connector && node dist-connector/server.mjs",
+    "build:reporter": "vite build -c vite.reporter.config.ts",
+    "token:confluence": "bash scripts/set-confluence-token.sh",
+    "token:jira": "bash scripts/set-jira-token.sh",
+    "token:gitlab": "bash scripts/set-gitlab-token.sh",
+    "token:inferhub": "bash scripts/set-inferhub-token.sh",
+    "token:9router": "bash scripts/set-9router-token.sh"
+  },
+  "dependencies": {
+    "@fontsource/poppins": "^5.3.0",
+    "baileys": "^7.0.0-rc14",
+    "dompurify": "^3.4.16",
+    "marked": "^18.0.14",
+    "mermaid": "^12.1.0",
+    "qrcode": "^1.5.4"
+  },
+  "devDependencies": {
+    "@sveltejs/vite-plugin-svelte": "^7.3.1",
+    "@tauri-apps/cli": "^2.12.1",
+    "@tsconfig/svelte": "^5.0.8",
+    "@types/node": "^26.6.4",
+    "@types/qrcode": "^1.5.6",
+    "jsdom": "^30.1.1",
+    "svelte": "^5.57.1",
+    "svelte-check": "^4.7.6",
+    "typescript": "~5.9.3",
+    "vite": "^8.3.2",
+    "vitest": "^5.0.3"
+  }
+}
