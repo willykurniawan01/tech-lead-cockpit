@@ -1,6 +1,7 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { Plugin } from 'vite';
 import type {
+  ChangelogRequest,
   ConnectorError,
   ConnectorStatus,
   PreflightRequest,
@@ -10,6 +11,7 @@ import type {
 } from '../src/lib/confluence/api-types.ts';
 import { appendAudit, readAudit } from './audit.ts';
 import { ConfluenceClient, ConfluenceError, type ConfluenceConfig } from './confluence.ts';
+import { generateConfluenceChangelog } from './confluence-changelog.ts';
 import type { StartGeneratorJobRequest } from '../src/lib/generator/types.ts';
 import { generatorJobs, JobConflictError } from './generator-jobs.ts';
 import { listProviders, startProviderRun, terminateProviderProcess } from './ai-providers.ts';
@@ -405,6 +407,16 @@ export function connectorMiddleware(env: Env, deps: ConnectorDeps) {
         return send(res, 200, { ok: true, message: 'Token Confluence berhasil disimpan ke Keychain.' });
       }
 
+      if (route === 'POST /confluence/changelog') {
+        const body = await readJson<ChangelogRequest>(req, 512 * 1024);
+        try {
+          const message = await generateConfluenceChangelog(body);
+          return send(res, 200, { message });
+        } catch (err) {
+          throw new ConfluenceError((err as Error).message, 500, 'upstream');
+        }
+      }
+
       if (route === 'GET /jira/status') {
         const { cfg: jCfg, status: jStatus } = await loadJiraConfig(env);
         if (!jCfg) return send(res, 200, jStatus);
@@ -478,7 +490,7 @@ export function connectorMiddleware(env: Env, deps: ConnectorDeps) {
         const client = new JiraClient(jCfg);
         if (route === 'GET /jira/users') {
           const q = (url.searchParams.get('q') ?? '').trim().slice(0, 100);
-          return send(res, 200, q.length < 2 ? [] : await client.searchUsers(q));
+          return send(res, 200, q.length < 1 ? [] : await client.searchUsers(q));
         }
         const body = await readJson<{ accountIds?: unknown; projectKeys?: unknown; excludeKeys?: unknown; defaultDays?: unknown; staleDays?: unknown }>(req, 256 * 1024);
         const list = (v: unknown) => (Array.isArray(v) ? v.map(String) : []);
@@ -563,6 +575,20 @@ export function connectorMiddleware(env: Env, deps: ConnectorDeps) {
         return send(res, 200, await client.searchPages(q, url.searchParams.get('space') ?? undefined));
       }
 
+      const getJiraMentionFallback = async () => {
+        try {
+          const { cfg: jCfg } = await loadJiraConfig(env);
+          if (!jCfg) return undefined;
+          const jClient = new JiraClient(jCfg);
+          return async (accountId: string) => {
+            const u = await jClient.getUser(accountId);
+            return u?.displayName ?? null;
+          };
+        } catch {
+          return undefined;
+        }
+      };
+
       if (route === 'GET /confluence/page/version') {
         const id = url.searchParams.get('id')?.trim() ?? '';
         if (!/^\d{1,20}$/.test(id)) throw new ConfluenceError('ID halaman tidak valid.', 400, 'bad-request');
@@ -574,7 +600,13 @@ export function connectorMiddleware(env: Env, deps: ConnectorDeps) {
         const version = Number(url.searchParams.get('version'));
         if (!/^\d{1,20}$/.test(id) || !Number.isInteger(version) || version < 1) throw new ConfluenceError('ID atau versi halaman tidak valid.', 400, 'bad-request');
         const page = await client.pageAtVersion(id, version);
-        return send(res, 200, { ...page, storage: page.storage ? await client.withMentionNames(page.storage) : '' });
+        const fallback = await getJiraMentionFallback();
+        return send(res, 200, { ...page, storage: page.storage ? await client.withMentionNames(page.storage, fallback) : '' });
+      }
+
+      if (route === 'GET /confluence/users') {
+        const q = (url.searchParams.get('q') ?? '').trim().slice(0, 100);
+        return send(res, 200, q.length < 1 ? [] : await client.searchUsers(q));
       }
 
       if (route === 'POST /confluence/users/resolve') {
@@ -597,7 +629,8 @@ export function connectorMiddleware(env: Env, deps: ConnectorDeps) {
         } else {
           throw new ConfluenceError('Isi ID halaman, atau space dan judul.', 400, 'bad-request');
         }
-        return send(res, 200, { ...page, storage: page.storage ? await client.withMentionNames(page.storage) : '' });
+        const fallback = await getJiraMentionFallback();
+        return send(res, 200, { ...page, storage: page.storage ? await client.withMentionNames(page.storage, fallback) : '' });
       }
 
       if (route === 'POST /confluence/publish') {
@@ -1738,6 +1771,7 @@ async function publish(client: ConfluenceClient, body: PublishRequest, res: Serv
   const spaceKey = body.spaceKey.trim();
   const title = body.title.trim();
   const isUpdate = Boolean(body.pageId);
+  const isDraft = Boolean(body.asDraft);
   const audit = {
     action: isUpdate ? ('confluence.update' as const) : ('confluence.create' as const),
     spaceKey,
@@ -1746,6 +1780,7 @@ async function publish(client: ConfluenceClient, body: PublishRequest, res: Serv
     attachments: body.attachments?.length ?? 0,
     mrUrl: body.context?.mrUrl,
     jiraKeys: body.context?.jiraKeys,
+    isDraft,
   };
   let actor: string | undefined;
   let versionBefore: number | undefined;
@@ -1769,18 +1804,48 @@ async function publish(client: ConfluenceClient, body: PublishRequest, res: Serv
       }
       // Upload first so the updated page never references a missing image.
       for (const a of uploads) await client.upsertAttachment(current.id, a.filename, a.data, a.contentType);
-      page = await client.updatePage({ id: current.id, spaceKey, title, storage: body.storage, version: current.version + 1, message: body.versionMessage });
+
+      let targetVersion: number;
+      if (isDraft) {
+        targetVersion = current.version;
+      } else if (current.status === 'draft') {
+        targetVersion = current.version;
+      } else {
+        targetVersion = current.version + 1;
+      }
+      const status = isDraft ? 'draft' : 'current';
+
+      page = await client.updatePage({
+        id: current.id,
+        spaceKey,
+        title,
+        storage: body.storage,
+        version: targetVersion,
+        status,
+        message: body.versionMessage,
+      });
     } else {
       const existing = await client.findPage(spaceKey, title);
       if (existing) {
         return fail(res, 409, { error: `Halaman "${title}" sudah ada di space ${spaceKey}. Pilih update atau ganti judul.`, code: 'exists', page: { ...existing, storage: undefined } });
       }
-      page = await client.createPage({ spaceKey, title, parentId: body.parentId?.trim() || undefined, storage: body.storage });
+      const status = isDraft ? 'draft' : 'current';
+      page = await client.createPage({
+        spaceKey,
+        title,
+        parentId: body.parentId?.trim() || undefined,
+        storage: body.storage,
+        status,
+      });
       for (const a of uploads) await client.upsertAttachment(page.id, a.filename, a.data, a.contentType);
     }
 
     await appendAudit({ ...audit, ts: new Date().toISOString(), result: 'success', actor, pageId: page.id, versionBefore, versionAfter: page.version });
-    const response: PublishResponse = { page: { ...page, storage: undefined }, action: isUpdate ? 'update' : 'create' };
+    const response: PublishResponse = {
+      page: { ...page, storage: undefined },
+      action: isUpdate ? 'update' : 'create',
+      isDraft,
+    };
     return send(res, 200, response);
   } catch (e) {
     await appendAudit({ ...audit, ts: new Date().toISOString(), result: 'failure', actor, versionBefore, error: (e as Error).message }).catch(() => {});

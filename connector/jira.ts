@@ -238,6 +238,21 @@ export class JiraClient {
     return (data || []).filter((u) => u.active !== false && u.accountType !== 'app').map((u) => this.mapUser(u));
   }
 
+  /** Look up a user by accountId (Cloud) or username (DC) */
+  async getUser(accountId: string): Promise<JiraUser | null> {
+    const trimmed = accountId.trim();
+    if (!trimmed) return null;
+    try {
+      const apiPath = this.cfg.flavor === 'cloud'
+        ? `/rest/api/3/user?accountId=${encodeURIComponent(trimmed)}`
+        : `/rest/api/2/user?username=${encodeURIComponent(trimmed)}`;
+      const data = await this.request<any>(apiPath);
+      return data ? this.mapUser(data) : null;
+    } catch {
+      return null;
+    }
+  }
+
   /** Users who can be assigned issues in all of these projects. */
   async assignableUsers(projectKeys: string[], maxResults = 200): Promise<JiraUser[]> {
     const keys = encodeURIComponent(projectKeys.join(','));

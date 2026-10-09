@@ -127,5 +127,27 @@ describe('storageToMarkdown', () => {
     const md2 = htmlToMarkdown(html2);
     expect(md2).toBe(md);
   });
+
+  it('correctly converts various Confluence mention formats into human-readable mention spans', () => {
+    const xhtml = [
+      '<p>1. Link body CDATA: <ac:link><ri:user ri:account-id="acc-1" /><ac:plain-text-link-body><![CDATA[@Ridwan Dev]]></ac:plain-text-link-body></ac:link></p>',
+      '<p>2. Local-id first: <ac:link><ri:user ri:local-id="loc-123" ri:account-id="acc-2" /><ac:link-body>@Willy K</ac:link-body></ac:link></p>',
+      '<p>3. Data display name: <ac:link><ri:user ri:account-id="acc-3" data-display-name="Guntur" /></ac:link></p>',
+      '<p>4. DC username: <ac:link><ri:user ri:username="johndoe" /><ac:plain-text-link-body>@John Doe</ac:plain-text-link-body></ac:link></p>',
+      '<p>5. Bare ri:user: <ri:user ri:account-id="acc-5" data-display-name="Alice" /></p>',
+      '<p>6. Confluence user mention span: <span class="confluence-user-mention" data-account-id="acc-6">@Bob</span></p>',
+      '<p>7. Confluence user mention link: <a class="confluence-user-mention" data-account-id="acc-7" href="#">@Charlie</a></p>',
+    ].join('\n');
+
+    const { markdown } = storageToMarkdown(xhtml, 'Test Mentions');
+    expect(markdown).toContain('1. Link body CDATA: <span data-tlc-user="acc-1">@Ridwan Dev</span>');
+    expect(markdown).toContain('2. Local-id first: <span data-tlc-user="acc-2">@Willy K</span>');
+    expect(markdown).toContain('3. Data display name: <span data-tlc-user="acc-3">@Guntur</span>');
+    expect(markdown).toContain('4. DC username: <span data-tlc-user="johndoe">@John Doe</span>');
+    expect(markdown).toContain('5. Bare ri:user: <span data-tlc-user="acc-5">@Alice</span>');
+    expect(markdown).toContain('6. Confluence user mention span: <span data-tlc-user="acc-6">@Bob</span>');
+    expect(markdown).toContain('7. Confluence user mention link: <span data-tlc-user="acc-7">@Charlie</span>');
+  });
 });
+
 

@@ -51,6 +51,7 @@ export function renderPreview(md: string): PreviewResult {
           return text.replace(/^<!-- safe-xhtml -->/, '') + '\n';
         }
         if (isLineBreakTag(text)) return '<br />';
+        if (/^<\/?span\b/i.test(text.trim())) return text;
         // Raw HTML is not carried over to Confluence either; show it as text.
         return escapeXml(text);
       },
@@ -129,6 +130,8 @@ export function renderPreview(md: string): PreviewResult {
   }
 
   const raw = marked.parser(transformedTokens as Tokens.Generic[]) as string;
-  const html = DOMPurify.sanitize(raw, { ADD_ATTR: ['target', 'data-table-width', 'data-layout', 'data-highlight-colour'] });
+  const html = DOMPurify.sanitize(raw, {
+    ADD_ATTR: ['target', 'data-table-width', 'data-layout', 'data-highlight-colour', 'data-tlc-user', 'data-account-id', 'contenteditable'],
+  });
   return { html, diagrams };
 }

@@ -32,6 +32,15 @@ function describeNetworkError(err: unknown): string {
   return `Gagal menghubungi Confluence (${code || (err as Error)?.message || 'unknown'}).`;
 }
 
+function decodeHtmlEntities(s: string): string {
+  return s
+    .replace(/&#(\d+);/g, (_, n: string) => String.fromCharCode(Number(n)))
+    .replace(/&quot;/g, '"')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&amp;/g, '&');
+}
+
 export class ConfluenceClient {
   constructor(private readonly cfg: ConfluenceConfig) {}
 
@@ -106,8 +115,16 @@ export class ConfluenceClient {
       const p = await this.request<CloudPage>(`/api/v2/pages/${encodeURIComponent(id)}?body-format=storage`);
       return this.fromCloud(p, spaceKey);
     }
-    const p = await this.request<DcPage>(`/rest/api/content/${encodeURIComponent(id)}?expand=version,body.storage,space`);
-    return this.fromDc(p);
+    try {
+      const p = await this.request<DcPage>(`/rest/api/content/${encodeURIComponent(id)}?expand=version,body.storage,space`);
+      return this.fromDc(p);
+    } catch (e) {
+      if (e instanceof ConfluenceError && e.status === 404) {
+        const p = await this.request<DcPage>(`/rest/api/content/${encodeURIComponent(id)}?status=draft&expand=version,body.storage,space`);
+        return this.fromDc(p);
+      }
+      throw e;
+    }
   }
 
   /** Current version only (cheap: no body), to notice edits made directly in Confluence. Same v1 API on Cloud and DC. */
@@ -132,22 +149,31 @@ export class ConfluenceClient {
       const r = await this.request<{ results: CloudPage[]; _links?: { base?: string } }>(
         `/api/v2/pages?space-id=${space.id}&title=${encodeURIComponent(title)}&body-format=storage&status=current`,
       );
-      return r.results[0] ? this.fromCloud(r.results[0], spaceKey, r._links?.base) : null;
+      if (r.results[0]) return this.fromCloud(r.results[0], spaceKey, r._links?.base);
+      const rDraft = await this.request<{ results: CloudPage[]; _links?: { base?: string } }>(
+        `/api/v2/pages?space-id=${space.id}&title=${encodeURIComponent(title)}&body-format=storage&status=draft`,
+      ).catch(() => ({ results: [] as CloudPage[], _links: undefined }));
+      return rDraft.results[0] ? this.fromCloud(rDraft.results[0], spaceKey, rDraft._links?.base) : null;
     }
     const r = await this.request<{ results: DcPage[] }>(
       `/rest/api/content?type=page&spaceKey=${encodeURIComponent(spaceKey)}&title=${encodeURIComponent(title)}&expand=version,body.storage,space`,
     );
-    return r.results[0] ? this.fromDc(r.results[0]) : null;
+    if (r.results[0]) return this.fromDc(r.results[0]);
+    const rDraft = await this.request<{ results: DcPage[] }>(
+      `/rest/api/content?type=page&spaceKey=${encodeURIComponent(spaceKey)}&title=${encodeURIComponent(title)}&status=draft&expand=version,body.storage,space`,
+    ).catch(() => ({ results: [] as DcPage[] }));
+    return rDraft.results[0] ? this.fromDc(rDraft.results[0]) : null;
   }
 
-  async createPage(input: { spaceKey: string; title: string; parentId?: string; storage: string }): Promise<PageInfo> {
+  async createPage(input: { spaceKey: string; title: string; parentId?: string; storage: string; status?: 'current' | 'draft' }): Promise<PageInfo> {
+    const status = input.status ?? 'current';
     if (this.cfg.flavor === 'cloud') {
       const space = await this.getSpace(input.spaceKey);
       const p = await this.request<CloudPage>('/api/v2/pages', {
         method: 'POST',
         body: JSON.stringify({
           spaceId: space.id,
-          status: 'current',
+          status,
           title: input.title,
           ...(input.parentId ? { parentId: input.parentId } : {}),
           body: { representation: 'storage', value: input.storage },
@@ -159,6 +185,7 @@ export class ConfluenceClient {
       method: 'POST',
       body: JSON.stringify({
         type: 'page',
+        status,
         title: input.title,
         space: { key: input.spaceKey },
         ...(input.parentId ? { ancestors: [{ id: input.parentId }] } : {}),
@@ -168,18 +195,19 @@ export class ConfluenceClient {
     return this.fromDc(p);
   }
 
-  async updatePage(input: { id: string; spaceKey: string; title: string; storage: string; version: number; message?: string }): Promise<PageInfo> {
+  async updatePage(input: { id: string; spaceKey: string; title: string; storage: string; version: number; message?: string; status?: 'current' | 'draft' }): Promise<PageInfo> {
     const version = { number: input.version, message: input.message ?? '' };
+    const status = input.status ?? 'current';
     if (this.cfg.flavor === 'cloud') {
       const p = await this.request<CloudPage>(`/api/v2/pages/${encodeURIComponent(input.id)}`, {
         method: 'PUT',
-        body: JSON.stringify({ id: input.id, status: 'current', title: input.title, body: { representation: 'storage', value: input.storage }, version }),
+        body: JSON.stringify({ id: input.id, status, title: input.title, body: { representation: 'storage', value: input.storage }, version }),
       });
       return this.fromCloud(p, input.spaceKey);
     }
     const p = await this.request<DcPage>(`/rest/api/content/${encodeURIComponent(input.id)}?expand=version,space`, {
       method: 'PUT',
-      body: JSON.stringify({ id: input.id, type: 'page', title: input.title, version, body: { storage: { value: input.storage, representation: 'storage' } } }),
+      body: JSON.stringify({ id: input.id, type: 'page', status, title: input.title, version, body: { storage: { value: input.storage, representation: 'storage' } } }),
     });
     return this.fromDc(p);
   }
@@ -200,25 +228,131 @@ export class ConfluenceClient {
    * Mentions are stored as account ids; look up display names so an imported TAD reads
    * "@Willy kurniawan" instead of an opaque id. Failures leave the mention as-is.
    */
-  async withMentionNames(storage: string): Promise<string> {
-    const ids = [...new Set([...storage.matchAll(/<ri:user\s+ri:(account-id|userkey)="([^"]+)"/g)].map((m) => `${m[1]}=${m[2]}`))].slice(0, 25);
+  async withMentionNames(storage: string, fallbackLookup?: (accountId: string) => Promise<string | null>): Promise<string> {
     const names = new Map<string, string>();
-    await Promise.all(
-      ids.map(async (pair) => {
-        const [kind, id] = pair.split('=');
-        const q = kind === 'account-id' ? `accountId=${encodeURIComponent(id)}` : `key=${encodeURIComponent(id)}`;
-        try {
-          const u = await this.request<{ displayName?: string; publicName?: string }>(`/rest/api/user?${q}`);
-          if (u.displayName || u.publicName) names.set(id, (u.displayName ?? u.publicName)!);
-        } catch {
-          /* keep the id */
+
+    // 1. First extract pre-existing display names from `<ac:plain-text-link-body>` or `<ac:link-body>`
+    //    and any existing `data-display-name` attributes.
+    const linkRegex = /<ac:link\b[\s\S]*?<\/ac:link>/g;
+    for (const match of storage.matchAll(linkRegex)) {
+      const linkMarkup = match[0];
+      const userMatch = linkMarkup.match(/<ri:user\b([^>]*?)\/?>/);
+      if (!userMatch) continue;
+      const attrs = userMatch[1];
+      const idMatch = attrs.match(/ri:(account-id|userkey|username)="([^"]+)"/);
+      if (!idMatch) continue;
+      const id = idMatch[2];
+
+      const existingNameMatch = attrs.match(/data-display-name="([^"]+)"/);
+      if (existingNameMatch) {
+        names.set(id, decodeHtmlEntities(existingNameMatch[1]));
+        continue;
+      }
+
+      const bodyMatch = linkMarkup.match(/<ac:(?:plain-text-link-body|link-body)>([\s\S]*?)<\/ac:(?:plain-text-link-body|link-body)>/);
+      if (bodyMatch) {
+        let text = bodyMatch[1].replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, '$1').trim();
+        text = text.replace(/^@/, '').trim();
+        if (text) {
+          names.set(id, text);
         }
-      }),
-    );
-    return storage.replace(/<ri:user\s+ri:(account-id|userkey)="([^"]+)"/g, (m, _k, id: string) => {
+      }
+    }
+
+    // 2. Collect all IDs that need lookup (matching any attribute ordering in <ri:user ...>)
+    const idsToFetch = new Map<string, { kind: string; id: string }>();
+    for (const match of storage.matchAll(/<ri:user\b([^>]*?)\/?>/g)) {
+      const attrs = match[1];
+      const idMatch = attrs.match(/ri:(account-id|userkey|username)="([^"]+)"/);
+      if (!idMatch) continue;
+      const kind = idMatch[1];
+      const id = idMatch[2];
+      if (!names.has(id) && !idsToFetch.has(id)) {
+        idsToFetch.set(id, { kind, id });
+      }
+    }
+
+    // 3. Batch query Confluence user API in chunks of 20
+    const pending = Array.from(idsToFetch.values());
+    for (let i = 0; i < pending.length; i += 20) {
+      const chunk = pending.slice(i, i + 20);
+      await Promise.all(
+        chunk.map(async ({ kind, id }) => {
+          const q = kind === 'account-id' ? `accountId=${encodeURIComponent(id)}` : kind === 'username' ? `username=${encodeURIComponent(id)}` : `key=${encodeURIComponent(id)}`;
+          try {
+            const u = await this.request<{ displayName?: string; publicName?: string }>(`/rest/api/user?${q}`);
+            if (u.displayName || u.publicName) {
+              names.set(id, (u.displayName ?? u.publicName)!);
+              return;
+            }
+          } catch {
+            /* Confluence lookup failed or 403, proceed to fallback */
+          }
+
+          if (fallbackLookup) {
+            try {
+              const fallbackName = await fallbackLookup(id);
+              if (fallbackName) names.set(id, fallbackName);
+            } catch {
+              /* ignore fallback error */
+            }
+          }
+        }),
+      );
+    }
+
+    // 4. Inject data-display-name into all <ri:user ...> tags that don't already have one
+    return storage.replace(/<ri:user\b([^>]*?)(\/?>)/g, (fullTag, attrs, closing) => {
+      if (attrs.includes('data-display-name=')) return fullTag;
+      const idMatch = attrs.match(/ri:(account-id|userkey|username)="([^"]+)"/);
+      if (!idMatch) return fullTag;
+      const id = idMatch[2];
       const n = names.get(id);
-      return n ? `${m} data-display-name="${n.replace(/[&"<>]/g, (c) => `&#${c.charCodeAt(0)};`)}"` : m;
+      if (!n) return fullTag;
+      const safeName = n.replace(/[&"<>]/g, (c) => `&#${c.charCodeAt(0)};`);
+      const cleanAttrs = attrs.trim();
+      const end = closing.trim() === '/>' ? ' />' : closing;
+      return `<ri:user ${cleanAttrs} data-display-name="${safeName}"${end}`;
     });
+  }
+
+  /** Search users in Confluence by name/email. */
+  async searchUsers(query: string, maxResults = 20): Promise<{ accountId: string; displayName: string; email?: string }[]> {
+    const q = query.trim();
+    if (!q) return [];
+    if (this.cfg.flavor === 'cloud') {
+      try {
+        const cql = encodeURIComponent(`user.fullname ~ "${q}"`);
+        const r = await this.request<{ results?: { user?: { accountId?: string; displayName?: string; publicName?: string; email?: string } }[] }>(
+          `/rest/api/search/user?cql=${cql}&limit=${maxResults}`,
+        );
+        return (r.results ?? [])
+          .map((x) => x.user)
+          .filter((u): u is { accountId: string; displayName?: string; publicName?: string; email?: string } => !!u?.accountId)
+          .map((u) => ({
+            accountId: u.accountId,
+            displayName: u.displayName || u.publicName || u.accountId,
+            email: u.email,
+          }));
+      } catch {
+        return [];
+      }
+    } else {
+      try {
+        const r = await this.request<{ results?: { key?: string; name?: string; displayName?: string; email?: string }[] }>(
+          `/rest/api/search/user?query=${encodeURIComponent(q)}&limit=${maxResults}`,
+        );
+        return (r.results ?? [])
+          .map((u) => ({
+            accountId: u.key || u.name || '',
+            displayName: u.displayName || u.name || '',
+            email: u.email,
+          }))
+          .filter((u) => !!u.accountId);
+      } catch {
+        return [];
+      }
+    }
   }
 
   /**
@@ -267,6 +401,7 @@ export class ConfluenceClient {
       id: String(p.id),
       title: p.title,
       version: p.version?.number ?? 1,
+      status: p.status === 'draft' ? 'draft' : 'current',
       url: this.pageUrl(p._links?.webui, linksBase ?? p._links?.base),
       spaceKey: resolvedSpace,
       storage: p.body?.storage?.value,
@@ -278,6 +413,7 @@ export class ConfluenceClient {
       id: String(p.id),
       title: p.title,
       version: p.version?.number ?? 1,
+      status: p.status === 'draft' ? 'draft' : 'current',
       url: this.pageUrl(p._links?.webui, p._links?.base),
       spaceKey: p.space?.key ?? '',
       storage: p.body?.storage?.value,
@@ -288,6 +424,7 @@ export class ConfluenceClient {
 interface CloudPage {
   id: string;
   title: string;
+  status?: string;
   version?: { number: number };
   body?: { storage?: { value: string } };
   _links?: { webui?: string; base?: string };
@@ -296,6 +433,7 @@ interface CloudPage {
 interface DcPage {
   id: string;
   title: string;
+  status?: string;
   version?: { number: number };
   body?: { storage?: { value: string } };
   space?: { key: string };

@@ -137,6 +137,13 @@ describe('mentions on publish', () => {
     expect(x).toContain('email @Willy kurniawan tidak diubah');
   });
 
+  it('converts atlassian-cli format mention spans into ac:link macros', () => {
+    const md = 'Reviewed by <span class="confluence-user-mention" data-account-id="acc-777">@Budi Santoso</span>.';
+    const x = toConfluenceStorage(md).xhtml;
+    expect(x).toContain(`Reviewed by ${link('acc-777')}.`);
+    expect(x).not.toContain('confluence-user-mention');
+  });
+
   it('links plain @Name only for known people (exact names)', () => {
     const md = '# T\n\nReviewer: @Guntur Saputro dan @Orang Asing.\n\n| Author | @Eka Widiantara |\n|---|---|\n| x | y |';
     const x = toConfluenceStorage(md, { mermaid: 'attachment', mermaidMacro: 'mermaid-cloud', toc: false, knownUsers: { 'Guntur Saputro': 'g-1', 'Eka Widiantara': 'e-1', Guntur: 'wrong' } }).xhtml;

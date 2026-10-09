@@ -5,6 +5,7 @@
   import { htmlToMarkdown } from '../lib/markdown/html-to-markdown';
   import { renderPreview } from '../lib/markdown/preview';
   import { extractTadHeadings, type TadHeading } from '../lib/tad/headings';
+  import MentionPicker from './MentionPicker.svelte';
 
   let {
     value,
@@ -75,6 +76,237 @@
   let currentWordMatches: WordMatch[] = [];
   let currentMdIndices: number[] = [];
 
+  // ---- Mention Autocomplete State ----
+  let mentionPicker: ReturnType<typeof MentionPicker> | undefined = $state();
+  let mentionVisible = $state(false);
+  let mentionQuery = $state('');
+  let mentionX = $state(0);
+  let mentionY = $state(0);
+  let mentionWordNode: Text | null = null;
+  let mentionWordAtOffset = -1;
+  let mentionMdStart = -1;
+
+  // Extract known mentioned users from the markdown document to populate local suggestions instantly
+  const knownDocumentUsers = $derived.by(() => {
+    const map: Record<string, string> = {};
+    if (!value || !mentionVisible) return map;
+    const regex = /<span[^>]+(?:data-tlc-user|data-account-id)="([^"]+)"[^>]*>@?([^<]+)<\/span>/gi;
+    let match: RegExpExecArray | null;
+    while ((match = regex.exec(value)) !== null) {
+      const id = match[1]?.trim();
+      const name = match[2]?.trim().replace(/^@/, '');
+      if (id && name) {
+        map[name] = id;
+      }
+    }
+    return map;
+  });
+
+  function closeMention() {
+    if (!mentionVisible && mentionQuery === '') return;
+    mentionVisible = false;
+    mentionQuery = '';
+    mentionWordNode = null;
+    mentionWordAtOffset = -1;
+    mentionMdStart = -1;
+  }
+
+  let mirrorDiv: HTMLDivElement | null = null;
+  function getMarkdownCaretCoordinates(textarea: HTMLTextAreaElement, position: number) {
+    if (!mirrorDiv) {
+      mirrorDiv = document.createElement('div');
+      mirrorDiv.style.position = 'absolute';
+      mirrorDiv.style.visibility = 'hidden';
+      mirrorDiv.style.whiteSpace = 'pre-wrap';
+      mirrorDiv.style.overflowWrap = 'break-word';
+      mirrorDiv.style.boxSizing = 'border-box';
+      mirrorDiv.style.top = '0';
+      mirrorDiv.style.left = '0';
+    }
+    const cs = getComputedStyle(textarea);
+    const props = [
+      'fontFamily', 'fontSize', 'fontWeight', 'lineHeight', 'letterSpacing',
+      'tabSize', 'paddingLeft', 'paddingRight', 'paddingTop', 'borderLeftWidth', 'borderTopWidth'
+    ] as const;
+    for (const p of props) (mirrorDiv.style as any)[p] = (cs as any)[p];
+    mirrorDiv.style.width = `${textarea.clientWidth}px`;
+    mirrorDiv.textContent = textarea.value.substring(0, position);
+    const span = document.createElement('span');
+    span.textContent = textarea.value.substring(position) || '.';
+    mirrorDiv.appendChild(span);
+
+    document.body.appendChild(mirrorDiv);
+    const spanOffsetTop = span.offsetTop;
+    const spanOffsetLeft = span.offsetLeft;
+    document.body.removeChild(mirrorDiv);
+
+    const taRect = textarea.getBoundingClientRect();
+    const top = taRect.top + spanOffsetTop - textarea.scrollTop;
+    const left = taRect.left + spanOffsetLeft - textarea.scrollLeft;
+    return { top, left };
+  }
+
+  function checkWordMentionTrigger() {
+    if (readOnly) {
+      closeMention();
+      return;
+    }
+    const sel = window.getSelection();
+    if (!sel || !sel.rangeCount || !sel.isCollapsed) {
+      closeMention();
+      return;
+    }
+    const node = sel.anchorNode;
+    if (!node || node.nodeType !== Node.TEXT_NODE) {
+      closeMention();
+      return;
+    }
+    const text = node.textContent || '';
+    const caretOffset = sel.anchorOffset;
+    const textBeforeCaret = text.slice(0, caretOffset);
+
+    // Fast check: if no '@' before caret, exit immediately without regex or rect layout
+    if (!textBeforeCaret.includes('@')) {
+      closeMention();
+      return;
+    }
+
+    // Match @ preceded by start of line, whitespace, or open paren
+    const match = /(?:^|[\s(])@([^\n@]{0,25})$/.exec(textBeforeCaret);
+    if (!match) {
+      closeMention();
+      return;
+    }
+
+    const query = match[1];
+    const atIndex = textBeforeCaret.lastIndexOf('@');
+    if (atIndex < 0) {
+      closeMention();
+      return;
+    }
+
+    mentionWordNode = node as Text;
+    mentionWordAtOffset = atIndex;
+    mentionQuery = query;
+
+    try {
+      const range = document.createRange();
+      range.setStart(node, atIndex);
+      range.setEnd(node, caretOffset);
+      const rects = range.getClientRects();
+      let rect = rects.length > 0 ? rects[rects.length - 1] : null;
+      if (!rect) {
+        rect = (node.parentElement || pageEl)?.getBoundingClientRect() || null;
+      }
+      if (rect) {
+        mentionX = rect.left;
+        mentionY = rect.bottom + 4;
+        mentionVisible = true;
+      }
+    } catch {
+      closeMention();
+    }
+  }
+
+  function checkMarkdownMentionTrigger() {
+    if (readOnly || !ta) {
+      closeMention();
+      return;
+    }
+    const caret = ta.selectionStart;
+    if (caret !== ta.selectionEnd) {
+      closeMention();
+      return;
+    }
+    // Only examine window of up to 30 chars before caret
+    const sliceStart = Math.max(0, caret - 30);
+    const textBeforeCaret = ta.value.slice(sliceStart, caret);
+    if (!textBeforeCaret.includes('@')) {
+      closeMention();
+      return;
+    }
+
+    const match = /(?:^|[\s(])@([^\n@]{0,25})$/.exec(textBeforeCaret);
+    if (!match) {
+      closeMention();
+      return;
+    }
+
+    const query = match[1];
+    const atIndex = ta.value.slice(0, caret).lastIndexOf('@');
+    if (atIndex < 0) {
+      closeMention();
+      return;
+    }
+
+    mentionMdStart = atIndex;
+    mentionQuery = query;
+
+    try {
+      const coords = getMarkdownCaretCoordinates(ta, caret);
+      mentionX = coords.left;
+      mentionY = coords.top + 20;
+      mentionVisible = true;
+    } catch {
+      closeMention();
+    }
+  }
+
+  function handleMentionSelect(user: { accountId: string; displayName: string }) {
+    if (mode === 'word') {
+      if (!mentionWordNode || !mentionWordNode.isConnected) {
+        closeMention();
+        return;
+      }
+      const text = mentionWordNode.textContent || '';
+      const sel = window.getSelection();
+      const currentOffset = sel?.anchorNode === mentionWordNode ? sel.anchorOffset : text.length;
+
+      const mentionSpan = document.createElement('span');
+      mentionSpan.className = 'confluence-user-mention';
+      mentionSpan.setAttribute('data-account-id', user.accountId);
+      mentionSpan.setAttribute('data-tlc-user', user.accountId);
+      mentionSpan.setAttribute('contenteditable', 'false');
+      mentionSpan.textContent = `@${user.displayName}`;
+
+      const spaceNode = document.createTextNode(' ');
+
+      const range = document.createRange();
+      range.setStart(mentionWordNode, mentionWordAtOffset);
+      range.setEnd(mentionWordNode, Math.min(text.length, currentOffset));
+      range.deleteContents();
+      range.insertNode(mentionSpan);
+      mentionSpan.after(spaceNode);
+
+      if (sel) {
+        const newRange = document.createRange();
+        newRange.setStartAfter(spaceNode);
+        newRange.collapse(true);
+        sel.removeAllRanges();
+        sel.addRange(newRange);
+      }
+
+      closeMention();
+      pageEl?.focus();
+      handleWordInput();
+    } else {
+      if (!ta || mentionMdStart < 0) {
+        closeMention();
+        return;
+      }
+      const pill = `<span class="confluence-user-mention" data-account-id="${user.accountId}" data-tlc-user="${user.accountId}">@${user.displayName}</span> `;
+      const before = ta.value.slice(0, mentionMdStart);
+      const after = ta.value.slice(ta.selectionEnd);
+      const nextVal = before + pill + after;
+      ta.value = nextVal;
+      const newPos = before.length + pill.length;
+      ta.setSelectionRange(newPos, newPos);
+      ta.focus();
+      onchange(nextVal);
+      closeMention();
+    }
+  }
+
   function setMode(m: EditorMode) {
     if (m === mode) return;
     if (mode === 'word' && pageEl && !readOnly) {
@@ -127,6 +359,7 @@
     isTyping = true;
     clearTimeout(typingTimer);
     updateSelectionContext();
+    checkWordMentionTrigger();
 
     typingTimer = setTimeout(() => {
       isTyping = false;
@@ -449,8 +682,174 @@
     return false;
   }
 
+  function isMentionPill(n: Node | null | undefined): n is HTMLElement {
+    return (
+      !!n &&
+      n.nodeType === Node.ELEMENT_NODE &&
+      ((n as HTMLElement).classList.contains('confluence-user-mention') ||
+        (n as HTMLElement).hasAttribute('data-tlc-user') ||
+        (n as HTMLElement).hasAttribute('data-account-id'))
+    );
+  }
+
+  function handleWordPillDeletion(key: 'Backspace' | 'Delete'): boolean {
+    const sel = window.getSelection();
+    if (!sel || !sel.rangeCount) return false;
+
+    // 1. If selection spans across a pill, ensure it is completely deleted
+    if (!sel.isCollapsed) {
+      const range = sel.getRangeAt(0);
+      let removedAny = false;
+      if (pageEl) {
+        const pills = pageEl.querySelectorAll('.confluence-user-mention, span[data-tlc-user]');
+        for (const pill of pills) {
+          if (range.intersectsNode(pill)) {
+            pill.remove();
+            removedAny = true;
+          }
+        }
+      }
+      if (removedAny) {
+        range.deleteContents();
+        handleWordInput();
+        return true;
+      }
+      return false;
+    }
+
+    const node = sel.anchorNode;
+    const offset = sel.anchorOffset;
+    if (!node) return false;
+
+    if (key === 'Backspace') {
+      let targetPill: HTMLElement | null = null;
+      let trailingSpaceNode: Text | null = null;
+
+      if (node.nodeType === Node.TEXT_NODE) {
+        if (offset === 0) {
+          let prev = node.previousSibling;
+          while (prev && prev.nodeType === Node.TEXT_NODE && !prev.textContent) {
+            prev = prev.previousSibling;
+          }
+          if (isMentionPill(prev)) {
+            targetPill = prev;
+          }
+        } else if (offset === 1 && (node.textContent === '\u00A0' || node.textContent === ' ')) {
+          let prev = node.previousSibling;
+          while (prev && prev.nodeType === Node.TEXT_NODE && !prev.textContent) {
+            prev = prev.previousSibling;
+          }
+          if (isMentionPill(prev)) {
+            targetPill = prev;
+            trailingSpaceNode = node as Text;
+          }
+        }
+      } else if (node.nodeType === Node.ELEMENT_NODE) {
+        const childBefore = node.childNodes[offset - 1];
+        if (isMentionPill(childBefore)) {
+          targetPill = childBefore;
+        } else if (
+          childBefore &&
+          childBefore.nodeType === Node.TEXT_NODE &&
+          (childBefore.textContent === '\u00A0' || childBefore.textContent === ' ')
+        ) {
+          const pillBeforeSpace = node.childNodes[offset - 2];
+          if (isMentionPill(pillBeforeSpace)) {
+            targetPill = pillBeforeSpace;
+            trailingSpaceNode = childBefore as Text;
+          }
+        }
+      }
+
+      if (targetPill) {
+        const parent = targetPill.parentNode;
+        const nextSibling = trailingSpaceNode ? trailingSpaceNode.nextSibling : targetPill.nextSibling;
+        trailingSpaceNode?.remove();
+        targetPill.remove();
+
+        if (parent) {
+          const newRange = document.createRange();
+          if (nextSibling) {
+            newRange.setStartBefore(nextSibling);
+          } else {
+            newRange.selectNodeContents(parent);
+            newRange.collapse(false);
+          }
+          sel.removeAllRanges();
+          sel.addRange(newRange);
+        }
+        handleWordInput();
+        return true;
+      }
+    } else if (key === 'Delete') {
+      let targetPill: HTMLElement | null = null;
+
+      if (node.nodeType === Node.TEXT_NODE) {
+        const len = node.textContent?.length ?? 0;
+        if (offset === len) {
+          let next = node.nextSibling;
+          while (next && next.nodeType === Node.TEXT_NODE && !next.textContent) {
+            next = next.nextSibling;
+          }
+          if (isMentionPill(next)) {
+            targetPill = next;
+          }
+        }
+      } else if (node.nodeType === Node.ELEMENT_NODE) {
+        const childAfter = node.childNodes[offset];
+        if (isMentionPill(childAfter)) {
+          targetPill = childAfter;
+        }
+      }
+
+      if (targetPill) {
+        const parent = targetPill.parentNode;
+        const nextSibling = targetPill.nextSibling;
+        if (
+          nextSibling &&
+          nextSibling.nodeType === Node.TEXT_NODE &&
+          (nextSibling.textContent === '\u00A0' || nextSibling.textContent === ' ')
+        ) {
+          nextSibling.remove();
+        }
+        targetPill.remove();
+
+        if (parent) {
+          const newRange = document.createRange();
+          if (nextSibling && nextSibling.isConnected) {
+            newRange.setStartBefore(nextSibling);
+          } else {
+            newRange.selectNodeContents(parent);
+            newRange.collapse(false);
+          }
+          sel.removeAllRanges();
+          sel.addRange(newRange);
+        }
+        handleWordInput();
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  function onWordKeyUp(e: KeyboardEvent) {
+    if (['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End', 'PageUp', 'PageDown'].includes(e.key)) {
+      updateSelectionContext();
+      checkWordMentionTrigger();
+    }
+  }
+
   function onWordKeyDown(e: KeyboardEvent) {
+    if (mentionVisible && mentionPicker?.handleKeydown(e)) return;
     if (handleCommonShortcuts(e)) return;
+
+    if (e.key === 'Backspace' || e.key === 'Delete') {
+      if (handleWordPillDeletion(e.key)) {
+        e.preventDefault();
+        return;
+      }
+    }
 
     if (readOnly) {
       if (
@@ -616,7 +1015,25 @@
   }
 
   function onMarkdownKeyDown(e: KeyboardEvent) {
+    if (mentionVisible && mentionPicker?.handleKeydown(e)) return;
     if (handleCommonShortcuts(e)) return;
+
+    if (e.key === 'Backspace' && ta && ta.selectionStart === ta.selectionEnd) {
+      const pos = ta.selectionStart;
+      const before = ta.value.slice(0, pos);
+      const pillRegex = /(?:<span\b[^>]*\b(?:data-tlc-user|data-account-id)=[^>]*>@?[^<]*<\/span>)(?:\s)?$/;
+      const match = pillRegex.exec(before);
+      if (match) {
+        e.preventDefault();
+        const len = match[0].length;
+        const newPos = pos - len;
+        const nextVal = ta.value.slice(0, newPos) + ta.value.slice(pos);
+        ta.value = nextVal;
+        ta.setSelectionRange(newPos, newPos);
+        onchange(nextVal);
+        return;
+      }
+    }
 
     if (readOnly) {
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 's') {
@@ -1256,8 +1673,8 @@
               oninput={handleWordInput}
               onblur={handleWordBlur}
               onkeydown={onWordKeyDown}
-              onkeyup={updateSelectionContext}
-              onclick={updateSelectionContext}
+              onkeyup={onWordKeyUp}
+              onclick={() => { updateSelectionContext(); closeMention(); }}
               spellcheck={!readOnly}
               role="textbox"
               tabindex={0}
@@ -1274,8 +1691,13 @@
             class:readonly-textarea={readOnly}
             readonly={readOnly}
             {value}
-            oninput={(e) => { if (!readOnly) onchange(e.currentTarget.value); }}
+            oninput={(e) => {
+              if (!readOnly) onchange(e.currentTarget.value);
+              checkMarkdownMentionTrigger();
+            }}
             onkeydown={onMarkdownKeyDown}
+            onkeyup={checkMarkdownMentionTrigger}
+            onclick={checkMarkdownMentionTrigger}
             spellcheck="false"
             aria-readonly={readOnly}
             aria-label="Editor Markdown TAD"
@@ -1321,6 +1743,17 @@
       </span>
     </div>
   </footer>
+
+  <MentionPicker
+    bind:this={mentionPicker}
+    visible={mentionVisible}
+    x={mentionX}
+    y={mentionY}
+    query={mentionQuery}
+    knownUsers={knownDocumentUsers}
+    onselect={handleMentionSelect}
+    onclose={closeMention}
+  />
 </div>
 
 <style>
@@ -1808,6 +2241,28 @@
     list-style: none;
   }
   .word-paper :global(span[data-tlc-user]),
+  .word-paper :global(.confluence-user-mention) {
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+    background: #f4f5f7 !important;
+    color: #0052cc !important;
+    border: 1px solid #dfe1e6 !important;
+    padding: 1px 7px;
+    border-radius: 12px;
+    font-weight: 500;
+    font-size: 0.9em;
+    line-height: 1.4;
+    user-select: all;
+    vertical-align: baseline;
+    white-space: nowrap;
+  }
+
+  .word-paper :global(span[data-tlc-user]:hover),
+  .word-paper :global(.confluence-user-mention:hover) {
+    background: #ebecf0 !important;
+  }
+
   .word-paper :global(span[data-tlc-jira]) {
     color: #0052cc;
   }

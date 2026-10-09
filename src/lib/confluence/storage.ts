@@ -91,18 +91,24 @@ export const CONFLUENCE_TOC_MACRO =
 // mention may sit in a paragraph, list, heading or any table cell.
 const MENTION_OPEN = '\u27E6user:';
 const MENTION_CLOSE = '\u27E7';
-const MENTION_SPAN = /<span data-tlc-user="([^"]*)">([\s\S]*?)<\/span>/g;
+const MENTION_SPAN = /<span\b(?=[^>]*\b(?:data-tlc-user|data-account-id)=)[^>]*>([\s\S]*?)<\/span>/gi;
 
 function decodeAttr(s: string): string {
   return s.replace(/&quot;/g, '"').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');
+}
+
+export function extractMentionId(tag: string): string | null {
+  const m = tag.match(/\b(?:data-tlc-user|data-account-id)="([^"]*)"/i);
+  return m ? decodeAttr(m[1]) : null;
 }
 
 /** Mention spans and known plain `@Name`s → placeholders (code spans and fences left alone). */
 export function markMentions(md: string, knownUsers: Record<string, string> = {}): string {
   const names = new Map(Object.entries(knownUsers).filter(([n, id]) => n.trim() && id));
   for (const m of md.matchAll(MENTION_SPAN)) {
-    const name = m[2].replace(/^@/, '').trim();
-    if (name && m[1]) names.set(name, decodeAttr(m[1]));
+    const id = extractMentionId(m[0]);
+    const name = m[1].replace(/^@/, '').trim();
+    if (name && id) names.set(name, id);
   }
   const byLength = [...names.keys()].sort((a, b) => b.length - a.length);
   const escape = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -112,7 +118,10 @@ export function markMentions(md: string, knownUsers: Record<string, string> = {}
     .split(/(```[\s\S]*?```|`[^`\n]*`)/g)
     .map((part, i) => {
       if (i % 2 === 1) return part;
-      let out = part.replace(MENTION_SPAN, (_, id: string) => `${MENTION_OPEN}${decodeAttr(id)}${MENTION_CLOSE}`);
+      let out = part.replace(MENTION_SPAN, (full) => {
+        const id = extractMentionId(full);
+        return id ? `${MENTION_OPEN}${id}${MENTION_CLOSE}` : full;
+      });
       if (plain) out = out.replace(plain, (_, name: string) => `${MENTION_OPEN}${names.get(name)}${MENTION_CLOSE}`);
       return out;
     })

@@ -154,4 +154,15 @@ Tujuan fitur ini adalah integrasi payment.
     expect(md).toContain('| id | bigint |');
     expect(md).not.toContain('<table');
   });
+
+  it('preserves user mention spans in paragraphs and tables', () => {
+    const html = `
+      <p>Assigned to <span class="confluence-user-mention" data-account-id="acc-123">@Willy Kurniawan</span> for review.</p>
+      <p>Legacy mention <span data-tlc-user="acc-456">@Ridwan</span> confirmed.</p>
+    `;
+    const md = htmlToMarkdown(html);
+    expect(md).toContain('<span data-tlc-user="acc-123">@Willy Kurniawan</span>');
+    expect(md).toContain('<span data-tlc-user="acc-456">@Ridwan</span>');
+  });
 });
+

@@ -332,8 +332,8 @@
               </a>
             {/if}
             {#if draft.confluence.pageId}
-              <a class="chip chip-ok" href={draft.confluence.url || `${appSettings.value.confluence.baseUrl}/pages/viewpage.action?pageId=${draft.confluence.pageId}`} target="_blank" rel="noreferrer">
-                <Icon name="confluence" size={12} /> Confluence v{draft.confluence.version} {#if draft.confluence.spaceKey}({draft.confluence.spaceKey}){/if} <Icon name="external" size={11} />
+              <a class="chip {draft.confluence.status === 'draft' ? 'chip-accent' : 'chip-ok'}" href={draft.confluence.url || `${appSettings.value.confluence.baseUrl}/pages/viewpage.action?pageId=${draft.confluence.pageId}`} target="_blank" rel="noreferrer">
+                <Icon name="confluence" size={12} /> Confluence v{draft.confluence.version} {#if draft.confluence.status === 'draft'}<span class="mono">(Draft)</span>{/if} {#if draft.confluence.spaceKey}({draft.confluence.spaceKey}){/if} <Icon name="external" size={11} />
               </a>
             {:else}
               <span class="chip">Draft Lokal</span>
@@ -410,7 +410,7 @@
           <ExportMenu {draft} {title} />
 
           <button class="btn btn-primary" onclick={() => (publishOpen = true)}>
-            <Icon name="upload" /> {draft.confluence.pageId ? 'Update Confluence' : 'Publish'}
+            <Icon name="upload" /> {draft.confluence.pageId ? (draft.confluence.status === 'draft' ? 'Update / Publish Draft' : 'Update Confluence') : 'Publish'}
           </button>
         </div>
       </header>

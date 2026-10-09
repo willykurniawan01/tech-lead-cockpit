@@ -85,6 +85,12 @@ function inline(node: Node, inTable = false): string {
     return text.replace(trimmed, `${mark}${trimmed}${mark}`);
   };
 
+  if (el.prefix === 'ri' && el.localName === 'user') {
+    const accountId = el.getAttribute('ri:account-id') || el.getAttribute('ri:userkey') || el.getAttribute('ri:username') || '';
+    const display = el.getAttribute('data-display-name') ?? undefined;
+    return accountId ? mentionHtml(accountId, display) : `@${display ?? 'user'}`;
+  }
+
   if (el.prefix === 'ac') {
     if (isAc(el, 'structured-macro')) {
       const macro = el.getAttribute('ac:name') ?? '';
@@ -98,8 +104,10 @@ function inline(node: Node, inTable = false): string {
       const user = kids(el).find((c) => c.prefix === 'ri' && c.localName === 'user');
       if (user) {
         // Keep the account id (as Cockpit's mention span) so publishing turns it back into a mention.
-        const accountId = user.getAttribute('ri:account-id') || user.getAttribute('ri:userkey');
-        const display = user.getAttribute('data-display-name') ?? undefined;
+        const accountId = user.getAttribute('ri:account-id') || user.getAttribute('ri:userkey') || user.getAttribute('ri:username') || '';
+        const linkBody = kids(el).find((c) => isAc(c, 'plain-text-link-body') || isAc(c, 'link-body'))?.textContent?.trim();
+        const cleanedBody = linkBody ? linkBody.replace(/^@/, '').trim() : undefined;
+        const display = user.getAttribute('data-display-name') || cleanedBody || undefined;
         return accountId ? mentionHtml(accountId, display) : `@${display ?? 'user'}`;
       }
       const page = kids(el).find((c) => c.prefix === 'ri' && c.localName === 'page');
@@ -130,11 +138,21 @@ function inline(node: Node, inTable = false): string {
     case 'br':
       return inTable ? '<br>' : '  \n';
     case 'a': {
+      if (el.classList.contains('confluence-user-mention') || el.classList.contains('user-mention') || el.hasAttribute('data-account-id') || el.hasAttribute('data-tlc-user')) {
+        const id = el.getAttribute('data-tlc-user') || el.getAttribute('data-account-id') || el.getAttribute('data-username') || '';
+        const nameText = el.textContent?.replace(/^@/, '').trim() || undefined;
+        if (id) return mentionHtml(id, nameText);
+      }
       const text = inner().trim();
       const href = el.getAttribute('href') ?? '';
       return href ? `[${text || href}](${href})` : text;
     }
     case 'span':
+      if (el.hasAttribute('data-tlc-user') || el.hasAttribute('data-account-id') || el.classList.contains('confluence-user-mention') || el.classList.contains('user-mention')) {
+        const id = el.getAttribute('data-tlc-user') || el.getAttribute('data-account-id') || el.getAttribute('data-username') || '';
+        return mentionHtml(id, el.textContent?.replace(/^@/, '').trim());
+      }
+      return inner();
     case 'u':
     case 'sub':
     case 'sup':
@@ -267,6 +285,12 @@ function serializeNode(node: Node): string {
   const el = node as Element;
   const tag = name(el);
 
+  if (el.prefix === 'ri' && el.localName === 'user') {
+    const accountId = el.getAttribute('ri:account-id') || el.getAttribute('ri:userkey') || el.getAttribute('ri:username') || '';
+    const display = el.getAttribute('data-display-name') ?? undefined;
+    return accountId ? mentionHtml(accountId, display) : `@${display ?? 'user'}`;
+  }
+
   if (el.prefix === 'ac') {
     if (isAc(el, 'structured-macro')) {
       const macro = el.getAttribute('ac:name') ?? '';
@@ -280,15 +304,27 @@ function serializeNode(node: Node): string {
     if (isAc(el, 'link')) {
       const user = kids(el).find((c) => c.prefix === 'ri' && c.localName === 'user');
       if (user) {
-        const accountId = user.getAttribute('ri:account-id') || user.getAttribute('ri:userkey');
-        const display = user.getAttribute('data-display-name') ?? undefined;
-        return accountId ? mentionHtml(accountId, display) : '@user';
+        const accountId = user.getAttribute('ri:account-id') || user.getAttribute('ri:userkey') || user.getAttribute('ri:username') || '';
+        const linkBody = kids(el).find((c) => isAc(c, 'plain-text-link-body') || isAc(c, 'link-body'))?.textContent?.trim();
+        const cleanedBody = linkBody ? linkBody.replace(/^@/, '').trim() : undefined;
+        const display = user.getAttribute('data-display-name') || cleanedBody || undefined;
+        return accountId ? mentionHtml(accountId, display) : `@${display ?? 'user'}`;
       }
       const label = kids(el).find((c) => isAc(c, 'plain-text-link-body') || isAc(c, 'link-body'))?.textContent?.trim();
       return label ? encodeText(label) : '';
     }
     if (isAc(el, 'emoticon')) return encodeText(emoticon(el));
     return Array.from(el.childNodes).map(serializeNode).join('');
+  }
+
+  if (tag === 'span' && (el.hasAttribute('data-tlc-user') || el.hasAttribute('data-account-id') || el.classList.contains('confluence-user-mention') || el.classList.contains('user-mention'))) {
+    const id = el.getAttribute('data-tlc-user') || el.getAttribute('data-account-id') || el.getAttribute('data-username') || '';
+    return mentionHtml(id, el.textContent?.replace(/^@/, '').trim());
+  }
+  if (tag === 'a' && (el.classList.contains('confluence-user-mention') || el.classList.contains('user-mention') || el.hasAttribute('data-account-id') || el.hasAttribute('data-tlc-user'))) {
+    const id = el.getAttribute('data-tlc-user') || el.getAttribute('data-account-id') || el.getAttribute('data-username') || '';
+    const nameText = el.textContent?.replace(/^@/, '').trim() || undefined;
+    if (id) return mentionHtml(id, nameText);
   }
 
   const inner = Array.from(el.childNodes).map(serializeNode).join('');
