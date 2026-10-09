@@ -13,10 +13,12 @@ class AiProviders {
   list = $state<AiProviderInfo[]>([]);
   loading = $state(false);
   error = $state('');
+  private inFlight = false;
   private loaded = false;
 
   async load(force = false) {
-    if ((this.loaded && !force) || this.loading) return;
+    if ((this.loaded && !force) || this.inFlight) return;
+    this.inFlight = true;
     this.loading = true;
     try {
       const res = await fetch(api('/api/connector/ai/providers'), { headers: { 'X-TLC-Client': '1' } });
@@ -27,6 +29,7 @@ class AiProviders {
     } catch (e) {
       this.error = `Gagal membaca daftar AI: ${(e as Error).message}`;
     } finally {
+      this.inFlight = false;
       this.loading = false;
     }
   }

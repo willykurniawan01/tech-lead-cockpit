@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onMount } from 'svelte';
   import Icon from '../components/Icon.svelte';
   import type { ConnectorStatus } from '../lib/confluence/api-types';
   import { connector, ConnectorRequestError } from '../lib/confluence/client';
@@ -107,7 +108,7 @@
     }
   }
 
-  $effect(() => {
+  onMount(() => {
     refresh();
     aiProviders.load(true);
   });

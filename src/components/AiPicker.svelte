@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onMount } from 'svelte';
   import { aiProviders } from '../lib/ai/providers.svelte';
   import type { AiProviderId, AiSelection } from '../lib/ai/types';
 
@@ -12,7 +13,7 @@
     disabled?: boolean;
   } = $props();
 
-  $effect(() => {
+  onMount(() => {
     aiProviders.load();
   });
 
