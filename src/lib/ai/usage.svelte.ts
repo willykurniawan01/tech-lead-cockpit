@@ -5,10 +5,12 @@ import { api } from '../api-base';
 class AiUsage {
   list = $state<AiProviderUsage[]>([]);
   loading = $state(false);
+  private inFlight = false;
   private lastLoad = 0;
 
   async load(force = false) {
-    if (this.loading || (!force && Date.now() - this.lastLoad < 60_000)) return;
+    if (this.inFlight || (!force && Date.now() - this.lastLoad < 60_000)) return;
+    this.inFlight = true;
     this.loading = true;
     try {
       const res = await fetch(api(`/api/connector/ai/usage${force ? '?refresh=1' : ''}`), { headers: { 'X-TLC-Client': '1' } });
@@ -17,6 +19,7 @@ class AiUsage {
     } catch {
       /* keep the previous numbers */
     } finally {
+      this.inFlight = false;
       this.loading = false;
     }
   }

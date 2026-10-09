@@ -1,11 +1,12 @@
 <script lang="ts">
+  import { onMount } from 'svelte';
   import Icon from './Icon.svelte';
   import { aiUsage } from '../lib/ai/usage.svelte';
   import type { AiProviderId } from '../lib/ai/types';
 
   let { provider, compact = false }: { provider: AiProviderId; compact?: boolean } = $props();
 
-  $effect(() => {
+  onMount(() => {
     aiUsage.load();
   });
 

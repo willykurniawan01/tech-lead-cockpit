@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onMount } from 'svelte';
   import Icon from '../components/Icon.svelte';
   import { toasts } from '../components/toast.svelte';
   import { teams } from '../lib/teams/client';
@@ -70,7 +71,7 @@
     return list;
   });
 
-  $effect(() => {
+  onMount(() => {
     refreshAll();
   });
 
