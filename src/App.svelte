@@ -1,5 +1,7 @@
 <script lang="ts">
-  import Icon, { type IconName } from './components/Icon.svelte';
+  import Icon from './components/Icon.svelte';
+  import TopNav from './components/TopNav.svelte';
+  import { NAV, RAIL, type View } from './lib/nav';
   import Toasts from './components/Toasts.svelte';
   import TadWorkspace from './tad/TadWorkspace.svelte';
   import ProjectsView from './projects/ProjectsView.svelte';
@@ -30,24 +32,6 @@
   let securityModalOpen = $state(false);
   // Keeps the VPS copy of the scheduled progress report fresh while the app is open.
   reportSync.start();
-
-  type View = 'dashboard' | 'assistant' | 'agents' | 'mr' | 'tad' | 'projects' | 'releases' | 'bugs' | 'teams' | 'whatsapp' | 'connections' | 'audit';
-
-  // Main views live in the top pill bar; settings-like views in the side rail.
-  const NAV: { id: View; label: string; icon: IconName; soon?: string; rail?: boolean }[] = [
-    { id: 'dashboard', label: 'Dashboard', icon: 'dashboard' },
-    { id: 'assistant', label: 'AI Assistant', icon: 'sparkles' },
-    { id: 'agents', label: 'Agent Tasks', icon: 'bot' },
-    { id: 'mr', label: 'MR Review', icon: 'merge' },
-    { id: 'tad', label: 'TAD', icon: 'doc' },
-    { id: 'projects', label: 'Proyek', icon: 'list' },
-    { id: 'releases', label: 'Rilis', icon: 'send' },
-    { id: 'bugs', label: 'Bug Tracing', icon: 'bug' },
-    { id: 'teams', label: 'Teams', icon: 'teams' },
-    { id: 'whatsapp', label: 'WhatsApp', icon: 'chat' },
-    { id: 'connections', label: 'Koneksi', icon: 'plug', rail: true },
-    { id: 'audit', label: 'Audit log', icon: 'history', rail: true },
-  ];
 
   function fromHash(): View {
     // `#/tad/<id>` style links still open the view itself.
@@ -109,14 +93,7 @@
         <span class="brand-name">Cockpit</span>
       </a>
 
-      <nav class="tabs pill" aria-label="Navigasi utama">
-        {#each NAV.filter((n) => !n.rail) as item (item.id)}
-          <a href="#/{item.id}" class:active={view === item.id} aria-current={view === item.id ? 'page' : undefined} title={item.soon ? `${item.label} · ${item.soon}` : item.label}>
-            <span class="tab-icon"><Icon name={item.icon} size={16} /></span>
-            <span class="tab-label">{item.label}</span>
-          </a>
-        {/each}
-      </nav>
+      <TopNav {view} />
 
       <RemoteIndicator />
 
@@ -145,7 +122,7 @@
       </div>
 
       <div class="rail-group">
-        {#each NAV.filter((n) => n.rail) as item (item.id)}
+        {#each RAIL as item (item.id)}
           <a href="#/{item.id}" class:current={view === item.id} aria-current={view === item.id ? 'page' : undefined} title={item.label}>
             <Icon name={item.icon} size={18} />
           </a>
@@ -260,40 +237,6 @@
     font-weight: 500;
     font-size: 16px;
     letter-spacing: -0.01em;
-  }
-
-  .tabs {
-    gap: 2px;
-    margin: 0 auto;
-    padding: 5px;
-    min-width: 0;
-    overflow-x: auto;
-    scrollbar-width: none;
-  }
-  .tabs a {
-    display: inline-flex;
-    align-items: center;
-    gap: 7px;
-    height: 38px;
-    padding: 0 16px;
-    border-radius: 999px;
-    color: var(--text-2);
-    text-decoration: none;
-    font-size: 15px;
-    font-weight: 400;
-    white-space: nowrap;
-    transition: background 0.12s, color 0.12s;
-  }
-  .tabs a:hover {
-    color: var(--text);
-    background: var(--surface-2);
-  }
-  .tabs a.active {
-    background: var(--ink);
-    color: var(--ink-text);
-  }
-  .tab-icon {
-    display: none;
   }
 
   .user {
@@ -416,17 +359,6 @@
     border-radius: var(--radius-lg);
   }
 
-  @media (max-width: 1180px) {
-    .tab-icon {
-      display: inline-flex;
-    }
-    .tabs a:not(.active) .tab-label {
-      display: none;
-    }
-    .tabs a:not(.active) {
-      padding: 0 12px;
-    }
-  }
   @media (max-width: 860px) {
     .frame {
       margin: 0;
@@ -443,10 +375,6 @@
     .brand,
     .user {
       padding: 5px;
-    }
-    .tabs {
-      margin: 0;
-      flex: 1;
     }
     .rail-group button,
     .rail-group a,

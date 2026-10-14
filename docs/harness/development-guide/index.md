@@ -88,6 +88,11 @@ Proyek ini dibangun di atas **Svelte 5** (`svelte: ^5.57.1`). Semua komponen dan
 ### 4. Ekstensi File Store Reaktif
 - Semua modul TypeScript yang menggunakan runes Svelte 5 di luar komponen `.svelte` WAJIB menggunakan ekstensi `*.svelte.ts` (misal: [`src/lib/settings/store.svelte.ts`](file:///Users/ridwan/mine/tech-lead-cockpit/src/lib/settings/store.svelte.ts), [`src/lib/auth/security.svelte.ts`](file:///Users/ridwan/mine/tech-lead-cockpit/src/lib/auth/security.svelte.ts)).
 
+### 5. Menambah Halaman (View) & Menu
+- Daftar halaman ada di [`src/lib/nav.ts`](../../../src/lib/nav.ts): `View` (route `#/<view>`), `GROUPS` untuk bar atas, dan `RAIL` untuk ikon pengaturan di samping.
+- Bar atas ([`src/components/TopNav.svelte`](../../../src/components/TopNav.svelte)) dibatasi 5 entri: Dashboard, **Perencanaan** (TAD, Proyek), **Delivery** (MR Review, Rilis, Bug Tracing), **AI** (AI Assistant, Agent Tasks), dan **Komunikasi** (Teams, WhatsApp). Grup yang berisi satu item tampil sebagai link biasa; grup lain menjadi dropdown dengan ikon dan keterangan satu baris (`hint`). Tombol grup menampilkan nama halaman aktif.
+- Halaman baru masuk ke grup yang sesuai. Jangan menambah entri bar atas baru tanpa alasan kuat. Komponen halamannya tetap dipasang di blok `{#if view === …}` di `src/App.svelte`.
+
 ---
 
 ## 🔌 Standar Backend Connector (Node 22 ESM)
