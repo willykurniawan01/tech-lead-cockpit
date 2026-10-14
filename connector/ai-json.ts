@@ -33,7 +33,7 @@ export function extractJson(reply: string): unknown {
  * strings: a note listing "({{a}}, {{b}}, {{c}})" is text and stays as written.
  */
 export function repairJson(text: string): string {
-  const bareVar = /\{\{\s*[$\w.-]+\s*\}\}/y;
+  const bareVar = /\{\{\s*[$\w.-]+\s*(?:\|\s*\w+\s*)?\}\}/y;
   const trailingComma = /,\s*[}\]]/y;
   let out = '';
   let inString = false;

@@ -3,11 +3,11 @@ import { mkdir, mkdtemp, readdir, readFile, rename, rm, writeFile } from 'node:f
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { AiSelection } from '../../src/lib/ai/types.ts';
-import type { QAAgentJob, QADatabase, QADbConnection, QADbResult, QADbServer, QAEnvironment, QAPipeline, QAPlan, QASuspect, QAFlow, QAGenerateJob, QAGenerateRequest, QARun, QARunRequest, QASuite } from '../../src/lib/qa/types.ts';
+import type { QAAgentJob, QADatabase, QADbConnection, QADbResult, QADbServer, QAEnvironment, QAPipeline, QAPlan, QASuspect, QAFlow, QAFlowResult, QAGenerateJob, QAGenerateRequest, QARun, QARunRequest, QASuite } from '../../src/lib/qa/types.ts';
 import { listDatabases, QaDbError, queryReadOnly, schemaSummary, testConnection } from './db.ts';
 import { matchDatabases } from '../../src/lib/qa/db-match.ts';
 import { buildQaPrompt, parseQaReply, QA_SYSTEM_PROMPT } from './generator.ts';
-import { buildPlanPrompt, buildRepairPrompt, checkFlowsAgainstPlan, evidenceMentions, parsePlan, parseRepair, PLAN_SYSTEM_PROMPT, REPAIR_SYSTEM_PROMPT } from './plan.ts';
+import { buildFixPrompt, buildPlanPrompt, buildRepairPrompt, checkFlowsAgainstPlan, evidenceMentions, FIX_SYSTEM_PROMPT, parseFix, parsePlan, parseRepair, PLAN_SYSTEM_PROMPT, REPAIR_SYSTEM_PROMPT } from './plan.ts';
 import { verifyEvidence } from '../trace/verify.ts';
 import { runFlow, summarize } from './runner.ts';
 import { DATA_DIR } from '../paths.ts';
@@ -26,6 +26,9 @@ const GENERATE_TIMEOUT_MS = 20 * 60_000;
 const DEFAULT_CONCURRENCY = 3;
 const MAX_CONCURRENCY = 5;
 const MAX_REPAIRS = 15;
+/** Flows per fix-by-instruction run, and per agent (small batches keep each answer short and exact). */
+const MAX_FIX_FLOWS = 80;
+const FIX_BATCH = 5;
 const ID = /^[A-Za-z0-9_-]{1,64}$/;
 
 export class QaInputError extends Error {}
@@ -828,6 +831,92 @@ export class QaManager {
       p.updatedAt = new Date().toISOString();
     })();
     return p;
+  }
+
+  /**
+   * Fixes flows by the Tech Lead's instruction ("msisdn harus string"): one agent per small batch,
+   * reading the code (struct types, router) and the flows' latest run. Changed flows replace the
+   * old ones as each batch finishes; the old versions are kept for one undo.
+   */
+  async fixFlows(projectId: string, opts: { flowIds: string[]; instruction: string; ai?: AiSelection; concurrency?: number }): Promise<QAPipeline> {
+    projectId = this.projectId(projectId);
+    const instruction = opts.instruction.trim().slice(0, 4_000);
+    if (!instruction) throw new QaInputError('Tulis instruksi perbaikannya.');
+    const suite = await this.getSuite(projectId);
+    if (!suite) throw new QaInputError('Belum ada test case.');
+    const wanted = new Set(opts.flowIds);
+    const flows = suite.flows.filter((f) => wanted.has(f.id));
+    if (!flows.length) throw new QaInputError('Pilih minimal satu test case.');
+    if (flows.length > MAX_FIX_FLOWS) throw new QaInputError(`Terlalu banyak test case (${flows.length}); maksimal ${MAX_FIX_FLOWS} sekali perbaikan.`);
+    const p = this.pipeline(projectId);
+    if (this.busyAgents(p).length) throw new QaInputError('Masih ada agent E2E yang berjalan untuk proyek ini.');
+    const plan = await this.getPlan(projectId);
+    const ai = opts.ai ?? plan?.ai ?? suite.ai;
+    if (!ai) throw new QaInputError('Pilih AI untuk agent perbaikan.');
+    // The latest result of each flow helps the agent see what the service answered.
+    const results = new Map<string, QAFlowResult>();
+    for (const run of await this.listRuns(projectId)) for (const r of run.flows) if (wanted.has(r.flowId) && !results.has(r.flowId)) results.set(r.flowId, r);
+    const batches: QAFlow[][] = [];
+    for (let i = 0; i < flows.length; i += FIX_BATCH) batches.push(flows.slice(i, i + FIX_BATCH));
+    p.concurrency = Math.min(MAX_CONCURRENCY, Math.max(1, Math.round(opts.concurrency ?? p.concurrency)));
+    const jobs = batches.map((b, i) => this.newAgent(projectId, 'fix', `Perbaiki AI: ${b.length === 1 ? b[0].name : `${b.length} test case (bagian ${i + 1}/${batches.length})`}`, ai, b.length === 1 ? { flowId: b[0].id } : {}));
+    p.agents = jobs;
+    p.phase = 'fixing';
+    p.updatedAt = new Date().toISOString();
+    for (const j of jobs) void this.syncAgent(j, suite.projectName);
+    // Undo restores every flow this instruction changed; a new instruction starts a new undo.
+    const undo = { at: new Date().toISOString(), label: instruction.slice(0, 200), flows: [] as QAFlow[] };
+    let chain: Promise<unknown> = Promise.resolve();
+    const apply = (fixed: { flow: QAFlow; summary: string }[]) =>
+      (chain = chain.then(async () => {
+        const cur = await this.getSuite(projectId);
+        if (!cur) return;
+        for (const { flow } of fixed) {
+          const old = cur.flows.find((f) => f.id === flow.id);
+          if (old && !undo.flows.some((f) => f.id === old.id)) undo.flows.push(old);
+        }
+        const map = new Map(fixed.map((x) => [x.flow.id, { ...x.flow, repairNote: `Diperbaiki AI: ${x.summary}` }]));
+        const next = cur.flows.map((f) => map.get(f.id) ?? f);
+        await this.saveSuite({ ...cur, flows: plan ? checkFlowsAgainstPlan(next, plan) : next, undo: { ...undo, flows: [...undo.flows] } });
+      }));
+
+    void (async () => {
+      await this.pool(jobs, p.concurrency, async (job) => {
+        const batch = batches[jobs.indexOf(job)];
+        try {
+          const services = [...new Set(batch.flatMap((f) => f.steps.map((st) => st.service).filter((x): x is string => Boolean(x))))];
+          const { codebase } = await this.prepareContext({ ...(plan?.request ?? { projectId, projectName: suite.projectName, categories: [] }), ai, tasks: services.map((sv) => ({ title: '', service: sv, spec: '' })), environmentId: undefined }, (t) => (job.progress = t));
+          const reply = await this.runAgent(job, suite.projectName, ai, buildFixPrompt(batch, instruction, results, codebase), FIX_SYSTEM_PROMPT, codebase ? [codebase.root] : []);
+          let fix: ReturnType<typeof parseFix>;
+          try {
+            fix = parseFix(reply, batch);
+          } catch (e) {
+            await this.finishAgent(job, suite.projectName, { error: e, rawReply: reply });
+            return;
+          }
+          if (fix.fixed.length) await apply(fix.fixed);
+          await chain;
+          const result = fix.fixed.length ? `${fix.fixed.length} test case diubah: ${fix.fixed.map((x) => x.summary).join(' · ')}` : 'tidak ada yang perlu diubah';
+          await this.finishAgent(job, suite.projectName, { result: `${result}${fix.notes ? ` · Catatan: ${fix.notes}` : ''}`.slice(0, 1_500) });
+        } catch (e) {
+          await this.finishAgent(job, suite.projectName, { error: e });
+        }
+      });
+      p.phase = 'idle';
+      p.updatedAt = new Date().toISOString();
+    })();
+    return p;
+  }
+
+  /** Puts back the flows the last AI fix changed (flows deleted since then stay deleted). */
+  async undoFix(projectId: string): Promise<QASuite> {
+    projectId = this.projectId(projectId);
+    const suite = await this.getSuite(projectId);
+    if (!suite?.undo?.flows.length) throw new QaInputError('Tidak ada perbaikan AI yang bisa dibatalkan.');
+    if (this.busyAgents(this.pipeline(projectId)).some((a) => a.role === 'fix')) throw new QaInputError('Agent perbaikan masih berjalan; tunggu atau batalkan dulu.');
+    const back = new Map(suite.undo.flows.map((f) => [f.id, f]));
+    const { undo: _undo, ...rest } = suite;
+    return this.saveSuite({ ...rest, flows: suite.flows.map((f) => back.get(f.id) ?? f) });
   }
 
   /** Stops one agent (or every agent of the project's pipeline). */

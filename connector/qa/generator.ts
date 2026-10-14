@@ -174,7 +174,7 @@ export function buildQaPrompt(req: QAGenerateRequest): string {
     '- Nilai dari response step sebelumnya diambil lewat "extract" (JSON path $.a.b[0].c atau "header:Nama-Header") lalu dipakai sebagai {{nama}}.',
     '- Data uji yang perlu disiapkan tester (kredensial, nomor akun, merchant id) tulis sebagai {{nama}} dan isi contoh di "variables" flow; nilai asli diisi tester di environment dan menimpa contoh ini. JANGAN menulis kredensial asli. Untuk uji negatif pakai nama variabel lain (mis. {{wrongPassword}}) atau nilai langsung.',
     '- Untuk nilai unik pakai {{$uuid}}, {{$timestamp}}, {{$unix}}, {{$now}}, atau {{$randomInt}}.',
-    '- {{nama}} SELALU ditulis di dalam string JSON, mis. "amount": "{{amount}}" (angka akan dikonversi otomatis), bukan "amount": {{amount}}.',
+    '- {{nama}} SELALU ditulis di dalam string JSON, bukan "amount": {{amount}}. Tulis TIPE field sesuai kontrak/struct request: "{{amount|number}}" untuk angka, "{{flag|boolean}}" untuk boolean, "{{msisdn|string}}" untuk string yang berisi angka (nomor HP, nomor rekening, kode, id bertipe string). Variabel hasil "extract" otomatis memakai tipe aslinya dari response; tanpa tipe, hanya angka aman (tanpa nol di depan, maksimal 15 digit) yang dikirim sebagai number.',
     '- Auth environment (bearer/basic/API key) dipasang otomatis; set "useEnvAuth": false untuk step login atau uji tanpa auth.',
     `- Operator assertion "json"/"header": ${QA_VALUE_OPS.join(', ')}. "type" bernilai string|number|boolean|object|array|null.`,
     '- Assertion fokus pada kontrak penting: status code, field kunci, status bisnis, kode error. Jangan assert nilai yang berubah-ubah (timestamp, id acak).',

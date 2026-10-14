@@ -242,6 +242,52 @@
     }
   }
 
+  // Fix by instruction: an agent reads the code and the latest run, and changes only what the instruction asks.
+  let fixOpen = $state(false);
+  let fixInstruction = $state('');
+  /** 'checked' = flows ticked to run, 'visible' = the search result, else one flow id. */
+  let fixScope = $state<'checked' | 'visible' | string>('checked');
+  const FIX_PRESETS = [
+    'Sesuaikan tipe data setiap field request dengan struct request di kode (string vs number vs boolean); nomor HP, nomor rekening, kode, dan id bertipe string wajib string.',
+    'Perbaiki test yang gagal di run terakhir: cocokkan path, method, header, field, dan ekspektasi dengan router/handler dan response service.',
+    'Samakan nama field request dan path dengan kode (tag json di struct dan router), termasuk prefix group.',
+  ];
+  const fixFlowIds = $derived.by(() => {
+    if (fixScope === 'checked') return enabledFlows.map((f) => f.id);
+    if (fixScope === 'visible') return visibleFlows.map((f) => f.id);
+    return (suite?.flows ?? []).some((f) => f.id === fixScope) ? [fixScope] : [];
+  });
+  const fixSingle = $derived(fixScope !== 'checked' && fixScope !== 'visible' ? suite?.flows.find((f) => f.id === fixScope) : undefined);
+
+  function openFix(flowId?: string) {
+    fixScope = flowId ?? 'checked';
+    fixOpen = true;
+    showGenerate = false;
+  }
+
+  async function startFix() {
+    if (!fixInstruction.trim() || !fixFlowIds.length) return;
+    try {
+      pipeline = await qa.fixFlows(project.id, fixFlowIds, fixInstruction, ai);
+      fixOpen = false;
+      toasts.show(`Agent perbaikan memeriksa ${fixFlowIds.length} test case di background (juga di Agent Tasks).`, 'ok');
+    } catch (e) {
+      toasts.show((e as Error).message, 'err');
+    }
+  }
+
+  async function undoFix() {
+    if (!suite?.undo) return;
+    const ok = await confirmDialog({ title: 'Batalkan perbaikan AI?', message: `${suite.undo.flows.length} test case dikembalikan ke versi sebelum perbaikan "${suite.undo.label}".`, confirmText: 'Kembalikan' });
+    if (!ok) return;
+    try {
+      suite = await qa.undoFix(project.id);
+      toasts.show('Test case dikembalikan.', 'ok', 2000);
+    } catch (e) {
+      toasts.show((e as Error).message, 'err');
+    }
+  }
+
   /** A suspect from a repair agent becomes a Bug Tracing case (with the failing request). */
   async function suspectToBug(sp: QASuspect) {
     if (!suite) return;
@@ -550,8 +596,46 @@
           <button class="btn btn-ghost btn-sm" onclick={() => setAll(true)}>Centang semua</button>
           <button class="btn btn-ghost btn-sm" onclick={() => setAll(false)}>Kosongkan</button>
           <span class="grow"></span>
+          <button class="btn btn-sm" class:btn-primary={fixOpen} onclick={() => (fixOpen ? (fixOpen = false) : openFix())} disabled={pipelineBusy} title="AI memperbaiki test case sesuai instruksimu (membaca kode, hanya baca)"><Icon name="sparkles" size={13} /> Perbaiki dengan AI</button>
           <button class="btn btn-sm" onclick={addFlow}><Icon name="plus" size={13} /> Flow manual</button>
         </div>
+        {#if suite.undo?.flows.length}
+          <div class="undo-bar small">
+            <Icon name="history" size={13} />
+            <span>Perbaikan AI "<em>{suite.undo.label.length > 90 ? `${suite.undo.label.slice(0, 90)}…` : suite.undo.label}</em>" mengubah {suite.undo.flows.length} test case.</span>
+            <button class="btn btn-ghost btn-sm" onclick={undoFix} disabled={pipelineBusy}>Batalkan perbaikan</button>
+          </div>
+        {/if}
+        {#if fixOpen}
+          <section class="card fix">
+            <h3><Icon name="sparkles" size={14} /> Perbaiki test case dengan AI</h3>
+            <label class="field">
+              <span>Instruksi</span>
+              <textarea class="input" rows="3" bind:value={fixInstruction} placeholder="mis. field msisdn dan account_no harus string, bukan integer; cek struct request di core-promo-ultimate"></textarea>
+            </label>
+            <div class="presets">
+              {#each FIX_PRESETS as p (p)}
+                <button class="chip preset" onclick={() => (fixInstruction = p)} title={p}>{p.split(':')[0].split(';')[0].slice(0, 70)}</button>
+              {/each}
+            </div>
+            <div class="fix-row">
+              <label class="field">
+                <span>Test case</span>
+                <select class="input" bind:value={fixScope}>
+                  <option value="checked">Yang dicentang ({enabledFlows.length})</option>
+                  {#if flowQuery || flowCategory}<option value="visible">Hasil pencarian ({visibleFlows.length})</option>{/if}
+                  {#if fixSingle}<option value={fixSingle.id}>Hanya: {fixSingle.name}</option>{/if}
+                </select>
+              </label>
+              <AiPicker value={ai} onchange={(s) => (ai = s)} />
+            </div>
+            <p class="muted small">Agent membaca kode service (struct request, router, handler; hanya baca) dan hasil run terakhir, lalu hanya mengubah yang diminta. Tiap test case yang berubah diberi catatan, dan versi sebelumnya bisa dikembalikan.{#if !canReadCode} <em>Provider ini tidak bisa membaca kode; pakai Claude CLI atau Antigravity untuk cek tipe ke struct.</em>{/if}</p>
+            <div class="fix-actions">
+              <button class="btn btn-primary btn-sm" onclick={startFix} disabled={!fixInstruction.trim() || !fixFlowIds.length || pipelineBusy}><Icon name="sparkles" size={13} /> Perbaiki {fixFlowIds.length} test case</button>
+              <button class="btn btn-ghost btn-sm" onclick={() => (fixOpen = false)}>Tutup</button>
+            </div>
+          </section>
+        {/if}
         {#if !visibleFlows.length}
           <p class="muted small">Tidak ada test case yang cocok. <button class="link-btn" onclick={() => { flowQuery = ''; flowCategory = ''; }}>Reset pencarian</button></p>
         {/if}
@@ -581,6 +665,7 @@
               <button class="btn btn-ghost btn-sm order-btn" onclick={() => moveFlow(flow, -1)} disabled={suite.flows[0]?.id === flow.id} title="Naikkan (urutan journey)" aria-label="Naikkan">↑</button>
               <button class="btn btn-ghost btn-sm order-btn" onclick={() => moveFlow(flow, 1)} disabled={suite.flows.at(-1)?.id === flow.id} title="Turunkan (urutan journey)" aria-label="Turunkan">↓</button>
               <button class="btn btn-ghost btn-sm" onclick={() => run([flow.id])} disabled={running || starting} title="Jalankan flow ini saja"><Icon name="play" size={13} /></button>
+              <button class="btn btn-ghost btn-sm" onclick={() => openFix(flow.id)} disabled={pipelineBusy} title="Perbaiki test case ini dengan AI"><Icon name="sparkles" size={13} /></button>
               <button class="btn btn-ghost btn-sm" onclick={() => startEdit(flow)} title="Edit test case"><Icon name="edit" size={13} /></button>
               <button class="btn btn-ghost btn-sm" onclick={() => removeFlow(flow)} title="Hapus flow"><Icon name="trash" size={13} /></button>
             </div>
@@ -784,6 +869,52 @@
     border-radius: 8px;
     background: var(--warn-soft);
     color: var(--warn);
+  }
+  .undo-bar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    padding: 6px 10px;
+    border-radius: var(--radius);
+    background: var(--accent-soft);
+    color: var(--accent);
+  }
+  .fix {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+  .fix h3 {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin: 0;
+    font-size: 14px;
+  }
+  .presets {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  .preset {
+    cursor: pointer;
+    border: 1px solid var(--border);
+    font: inherit;
+    font-size: 12px;
+  }
+  .fix-row {
+    display: flex;
+    gap: 12px;
+    align-items: flex-end;
+    flex-wrap: wrap;
+  }
+  .fix-row .field {
+    min-width: 220px;
+  }
+  .fix-actions {
+    display: flex;
+    gap: 8px;
   }
   .repair-note {
     display: flex;

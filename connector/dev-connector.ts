@@ -55,7 +55,7 @@ import { bugDraftId, type BugAnalyzeRequest, type BugCaseInput, type BugChatRequ
 
 const manualMrs = new ManualMrs();
 import type { QAEnvironment, QAGenerateRequest, QAPlan, QARunRequest, QASuite } from '../src/lib/qa/types.ts';
-import { isAiSelection } from '../src/lib/ai/types.ts';
+import { isAiSelection, type AiSelection } from '../src/lib/ai/types.ts';
 import { isValidDraftId } from './generator-runner.ts';
 import { DraftFileError, DraftFiles } from './drafts-store.ts';
 import { renderCockpitContext, type CockpitState, type DraftForContext } from './cockpit-context.ts';
@@ -1114,6 +1114,16 @@ async function handleQa(route: string, url: URL, req: IncomingMessage, res: Serv
     if (route === 'POST /qa/repair') {
       const body = await readJson<{ projectId?: string; runId?: string; concurrency?: number }>(req, 64 * 1024);
       return send(res, 202, await qa.repairRun(String(body.projectId ?? ''), String(body.runId ?? ''), { concurrency: Number(body.concurrency) || undefined }));
+    }
+    if (route === 'POST /qa/fix') {
+      const body = await readJson<{ projectId?: string; flowIds?: unknown; instruction?: string; ai?: unknown; concurrency?: number }>(req, 64 * 1024);
+      if (body.ai !== undefined && !isAiSelection(body.ai)) throw new QaInputError('Pilihan AI tidak valid.');
+      const flowIds = (Array.isArray(body.flowIds) ? body.flowIds : []).map(String).slice(0, 500);
+      return send(res, 202, await qa.fixFlows(String(body.projectId ?? ''), { flowIds, instruction: String(body.instruction ?? ''), ai: body.ai as AiSelection | undefined, concurrency: Number(body.concurrency) || undefined }));
+    }
+    if (route === 'POST /qa/fix/undo') {
+      const body = await readJson<{ projectId?: string }>(req, 16 * 1024);
+      return send(res, 200, { suite: await qa.undoFix(String(body.projectId ?? '')) });
     }
     if (route === 'POST /qa/pipeline/cancel') {
       const body = await readJson<{ projectId?: string; agentId?: string }>(req, 16 * 1024);

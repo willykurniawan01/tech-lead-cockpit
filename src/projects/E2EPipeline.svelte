@@ -67,7 +67,7 @@
       } else if (p.agents[0]?.status === 'error') toasts.show(`Perencana gagal: ${p.agents[0].error}`, 'err', 8000);
       return;
     }
-    const role = p.agents[0]?.role === 'repair' ? 'Agent perbaikan' : 'Agent penulis';
+    const role = p.agents[0]?.role === 'repair' || p.agents[0]?.role === 'fix' ? 'Agent perbaikan' : 'Agent penulis';
     toasts.show(`${role} selesai: ${p.agents.length - failed}/${p.agents.length} berhasil.`, failed ? 'err' : 'ok', 5000);
     onsuite();
   }
@@ -133,7 +133,7 @@
     await qa.cancelAgent(a.id).catch((e) => toasts.show((e as Error).message, 'err'));
   }
 
-  const ROLE: Record<QAAgentJob['role'], string> = { plan: 'Perencana', write: 'Penulis', repair: 'Perbaikan' };
+  const ROLE: Record<QAAgentJob['role'], string> = { plan: 'Perencana', write: 'Penulis', repair: 'Perbaikan', fix: 'Perbaikan AI' };
   const STATUS: Record<QAAgentJob['status'], { label: string; cls: string }> = {
     queued: { label: 'Antri', cls: '' },
     running: { label: 'Berjalan', cls: 'st-run' },

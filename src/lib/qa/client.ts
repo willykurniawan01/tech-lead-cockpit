@@ -1,4 +1,5 @@
 import { api, connectorDownMessage } from '../api-base';
+import type { AiSelection } from '../ai/types';
 import type { QAAgentJob, QAEnvironment, QAGenerateJob, QAGenerateRequest, QAPipeline, QAPlan, QARun, QARunRequest, QASuite } from './types';
 
 const HEADERS = { 'Content-Type': 'application/json', 'X-TLC-Client': '1' };
@@ -46,6 +47,9 @@ export const qa = {
   savePlan: (plan: QAPlan) => post<{ plan: QAPlan }>('/plan/save', { plan }).then((r) => r.plan),
   writeFromPlan: (projectId: string, concurrency: number, stageIds?: string[]) => post<QAPipeline>('/plan/write', { projectId, concurrency, stageIds }),
   repairRun: (projectId: string, runId: string, concurrency?: number) => post<QAPipeline>('/repair', { projectId, runId, concurrency }),
+  /** AI fixes the chosen flows by an instruction (reads the code, keeps one undo). */
+  fixFlows: (projectId: string, flowIds: string[], instruction: string, ai?: AiSelection) => post<QAPipeline>('/fix', { projectId, flowIds, instruction, ai }),
+  undoFix: (projectId: string) => post<{ suite: QASuite }>('/fix/undo', { projectId }).then((r) => r.suite),
   cancelPipeline: (projectId: string) => post<{ pipeline: QAPipeline }>('/pipeline/cancel', { projectId }),
   cancelAgent: (agentId: string) => post<{ agent: QAAgentJob | null }>('/pipeline/cancel', { agentId }),
 };

@@ -142,6 +142,46 @@ describe('runFlow', () => {
     expect(new URL(calls[1].url).searchParams.get('ref')).toBe(sent.ref);
   });
 
+  it('sends each variable with its type: cast, extracted type, else only safe numbers', async () => {
+    const { f, calls } = fakeFetch((c) => (c.url.endsWith('/create') ? { status: 200, body: { data: { code: '00123', id: 77, ok: true, meta: { a: 1 } } } } : { status: 200, body: {} }));
+    const flow: QAFlow = {
+      ...loginThenOrder,
+      variables: { msisdn: '081234567890', account: '1234567890123', productId: '42', amount: '10000', big: '1234567890123456', flag: 'true' },
+      steps: [
+        { id: 'a', name: 'create', request: { method: 'POST', path: '/create', body: {} }, extract: { code: '$.data.code', id: '$.data.id', ok: '$.data.ok', meta: '$.data.meta' }, assertions: [] },
+        {
+          id: 'b',
+          name: 'use',
+          request: {
+            method: 'POST',
+            path: '/use/{{id}}',
+            body: { msisdn: '{{msisdn}}', account: '{{account|string}}', product: '{{productId|string}}', amount: '{{amount}}', total: '{{amount|number}}', big: '{{big}}', flag: '{{flag|boolean}}', code: '{{code}}', id: '{{id}}', ok: '{{ok}}', meta: '{{meta}}', note: 'kode {{code|string}}' },
+          },
+          assertions: [],
+        },
+      ],
+    };
+    const r = await runFlow(flow, 0, { env, fetch: f });
+    expect(r.status).toBe('passed');
+    expect(calls[1].url).toBe('https://api.dev.test/use/77');
+    expect(JSON.parse(calls[1].body!)).toEqual({
+      // A leading zero or more than 15 digits stays text (it used to crash or lose digits).
+      msisdn: '081234567890',
+      account: '1234567890123',
+      product: '42',
+      amount: 10000,
+      total: 10000,
+      big: '1234567890123456',
+      flag: true,
+      // Extracted values keep the type the response gave them.
+      code: '00123',
+      id: 77,
+      ok: true,
+      meta: { a: 1 },
+      note: 'kode 00123',
+    });
+  });
+
   it('skips the remaining steps after a failure', async () => {
     const { f, calls } = fakeFetch(() => ({ status: 500, body: { error: 'boom' } }));
     const result = await runFlow(loginThenOrder, 0, { env, fetch: f });

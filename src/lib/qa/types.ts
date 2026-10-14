@@ -223,7 +223,7 @@ export interface QAPlan {
   notes?: string;
 }
 
-export type QAAgentRole = 'plan' | 'write' | 'repair';
+export type QAAgentRole = 'plan' | 'write' | 'repair' | 'fix';
 
 /** One background agent of the E2E pipeline (also listed in Agent Tasks). */
 export interface QAAgentJob {
@@ -248,7 +248,7 @@ export interface QAAgentJob {
 
 export interface QAPipeline {
   projectId: string;
-  phase: 'idle' | 'planning' | 'review' | 'writing' | 'repairing';
+  phase: 'idle' | 'planning' | 'review' | 'writing' | 'repairing' | 'fixing';
   concurrency: number;
   agents: QAAgentJob[];
   updatedAt: string;
@@ -270,6 +270,8 @@ export interface QASuspect {
 export interface QASuite {
   /** Failed tests that look like service bugs (from the repair agents). */
   suspects?: QASuspect[];
+  /** The flows as they were before the last AI fix by instruction (one level of undo). */
+  undo?: { at: string; label: string; flows: QAFlow[] };
   projectId: string;
   projectName: string;
   flows: QAFlow[];

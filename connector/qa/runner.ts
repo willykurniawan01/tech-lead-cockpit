@@ -39,9 +39,9 @@ export interface RunContext {
   query?: (db: string, sql: string) => Promise<QADbResult>;
   /**
    * Values extracted by earlier flows of the same run (the journey: create promo → approve →
-   * reserve…), with the flow that produced each. Shared and updated across flows.
+   * reserve…), with the flow that produced each and the JSON type it had. Shared and updated across flows.
    */
-  carried?: { values: Record<string, string>; from: Record<string, string> };
+  carried?: { values: Record<string, string>; from: Record<string, string>; types?: Record<string, VarType> };
 }
 
 const BUILTINS: Record<string, () => string> = {
@@ -52,9 +52,13 @@ const BUILTINS: Record<string, () => string> = {
   $randomInt: () => String(Math.floor(Math.random() * 1_000_000)),
 };
 
-/** Replaces {{name}} with variables or built-ins; unknown names are left as is (and reported). */
+/** How a lone "{{name}}" is sent: written as "{{name|number}}" etc., or the JSON type it was extracted with. */
+export type VarType = 'string' | 'number' | 'boolean' | 'json';
+const VAR_TYPES = new Set<string>(['string', 'number', 'boolean', 'json']);
+
+/** Replaces {{name}} (or {{name|type}}) with variables or built-ins; unknown names are left as is (and reported). */
 export function interpolate(value: string, vars: Record<string, string>, missing?: Set<string>): string {
-  return value.replace(/\{\{\s*([$\w.-]+)\s*\}\}/g, (whole, name: string) => {
+  return value.replace(/\{\{\s*([$\w.-]+)\s*(?:\|\s*\w+\s*)?\}\}/g, (whole, name: string) => {
     if (name in vars) return vars[name];
     if (BUILTINS[name]) return BUILTINS[name]();
     missing?.add(name);
@@ -62,16 +66,34 @@ export function interpolate(value: string, vars: Record<string, string>, missing
   });
 }
 
-function interpolateDeep(value: unknown, vars: Record<string, string>, missing: Set<string>): unknown {
-  if (typeof value === 'string') {
-    // A value that is exactly one variable keeps a numeric/boolean look-alike as JSON, e.g. "{{amount}}" → 10000.
-    const only = value.match(/^\{\{\s*([$\w.-]+)\s*\}\}$/);
-    const out = interpolate(value, vars, missing);
-    if (only && out !== value && /^(-?\d+(\.\d+)?|true|false)$/.test(out)) return JSON.parse(out);
-    return out;
+/** A lone variable's value as JSON: its cast, else its extracted type, else only a safe number/boolean look-alike. */
+function typedValue(out: string, type: string | undefined): unknown {
+  if (type === 'string') return out;
+  if (type === 'number') return out.trim() !== '' && Number.isFinite(Number(out)) ? Number(out) : out;
+  if (type === 'boolean') return out === 'true' ? true : out === 'false' ? false : out;
+  if (type === 'json') {
+    try {
+      return JSON.parse(out);
+    } catch {
+      return out;
+    }
   }
-  if (Array.isArray(value)) return value.map((v) => interpolateDeep(v, vars, missing));
-  if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, interpolateDeep(v, vars, missing)]));
+  // No leading zero (phone 0812…, codes) and at most 15 digits (account numbers, ids): those stay text.
+  if (/^-?(0|[1-9]\d{0,14})(\.\d+)?$/.test(out) || out === 'true' || out === 'false') return JSON.parse(out);
+  return out;
+}
+
+export function interpolateDeep(value: unknown, vars: Record<string, string>, missing: Set<string>, types: Record<string, VarType> = {}): unknown {
+  if (typeof value === 'string') {
+    // A value that is exactly one variable becomes JSON of its type, e.g. "{{amount|number}}" → 10000.
+    const only = value.match(/^\{\{\s*([$\w.-]+)\s*(?:\|\s*(\w+)\s*)?\}\}$/);
+    const out = interpolate(value, vars, missing);
+    if (!only || out === value) return out;
+    const cast = only[2] && VAR_TYPES.has(only[2]) ? only[2] : types[only[1]];
+    return typedValue(out, cast);
+  }
+  if (Array.isArray(value)) return value.map((v) => interpolateDeep(v, vars, missing, types));
+  if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, interpolateDeep(v, vars, missing, types)]));
   return value;
 }
 
@@ -224,40 +246,44 @@ function authHeaders(env: QAEnvironment, secret?: string): Record<string, string
 }
 
 /** Values pulled from a response for later steps. Extracted values count as secrets when they look like tokens. */
-function extractVars(step: QAStep, json: unknown, headers: Record<string, string>): { values: Record<string, string>; missing: string[] } {
+function extractVars(step: QAStep, json: unknown, headers: Record<string, string>): { values: Record<string, string>; types: Record<string, VarType>; missing: string[] } {
   const values: Record<string, string> = {};
+  const types: Record<string, VarType> = {};
   const missing: string[] = [];
   for (const [name, source] of Object.entries(step.extract ?? {})) {
     if (source.startsWith('header:')) {
       const want = source.slice(7).trim().toLowerCase();
       const key = Object.keys(headers).find((k) => k.toLowerCase() === want);
-      if (key) values[name] = headers[key];
+      if (key) (values[name] = headers[key]), (types[name] = 'string');
       else missing.push(name);
       continue;
     }
     const { found, value } = jsonPath(json, source);
-    if (found && value !== undefined && value !== null) values[name] = typeof value === 'object' ? JSON.stringify(value) : String(value);
-    else missing.push(name);
+    if (found && value !== undefined && value !== null) {
+      values[name] = typeof value === 'object' ? JSON.stringify(value) : String(value);
+      // An id that came back as "123" is sent back as "123", a number as a number.
+      types[name] = typeof value === 'object' ? 'json' : typeof value === 'number' ? 'number' : typeof value === 'boolean' ? 'boolean' : 'string';
+    } else missing.push(name);
   }
-  return { values, missing };
+  return { values, types, missing };
 }
 
 const isTokenName = (name: string) => /token|secret|password|passwd|session|cookie|signature|otp|pin/i.test(name);
 
-async function runStep(step: QAStep, vars: Record<string, string>, ctx: RunContext, secrets: string[]): Promise<{ result: QAStepResult; extracted: Record<string, string> }> {
+async function runStep(step: QAStep, vars: Record<string, string>, types: Record<string, VarType>, ctx: RunContext, secrets: string[]): Promise<{ result: QAStepResult; extracted: Record<string, string>; extractedTypes: Record<string, VarType> }> {
   const base: QAStepResult = { stepId: step.id, name: step.name, status: 'running', startedAt: new Date().toISOString(), assertions: [] };
   const method = step.request.method.toUpperCase();
   if (ctx.env.readOnly && method !== 'GET') {
-    return { result: { ...base, status: 'blocked', error: `Environment "${ctx.env.name}" read-only: request ${method} tidak dikirim.` }, extracted: {} };
+    return { result: { ...base, status: 'blocked', error: `Environment "${ctx.env.name}" read-only: request ${method} tidak dikirim.` }, extracted: {}, extractedTypes: {} };
   }
   const missing = new Set<string>();
   const path = interpolate(step.request.path, vars, missing);
   if (/^[a-z][a-z0-9+.-]*:/i.test(path) || path.startsWith('//')) {
-    return { result: { ...base, status: 'error', error: 'Path step tidak boleh berisi host/URL lengkap; host diambil dari environment.' }, extracted: {} };
+    return { result: { ...base, status: 'error', error: 'Path step tidak boleh berisi host/URL lengkap; host diambil dari environment.' }, extracted: {}, extractedTypes: {} };
   }
   const baseUrl = baseUrlFor(ctx.env, step.service);
   if (!/^https?:\/\//i.test(baseUrl)) {
-    return { result: { ...base, status: 'error', error: `Base URL untuk service "${step.service ?? '(default)'}" belum diatur di environment.` }, extracted: {} };
+    return { result: { ...base, status: 'error', error: `Base URL untuk service "${step.service ?? '(default)'}" belum diatur di environment.` }, extracted: {}, extractedTypes: {} };
   }
   const query = Object.fromEntries(Object.entries(step.request.query ?? {}).map(([k, v]) => [k, interpolate(String(v), vars, missing)]));
   const headers: Record<string, string> = {
@@ -265,21 +291,21 @@ async function runStep(step: QAStep, vars: Record<string, string>, ctx: RunConte
     ...(step.useEnvAuth === false ? {} : authHeaders(ctx.env, ctx.secret)),
     ...Object.fromEntries(Object.entries(step.request.headers ?? {}).map(([k, v]) => [k, interpolate(String(v), vars, missing)])),
   };
-  const bodyValue = step.request.body === undefined || method === 'GET' ? undefined : interpolateDeep(step.request.body, vars, missing);
+  const bodyValue = step.request.body === undefined || method === 'GET' ? undefined : interpolateDeep(step.request.body, vars, missing, types);
   const body = bodyValue === undefined ? undefined : typeof bodyValue === 'string' ? bodyValue : JSON.stringify(bodyValue);
 
   let url: string;
   try {
     url = joinUrl(baseUrl, path, query);
   } catch {
-    return { result: { ...base, status: 'error', error: `URL tidak valid: ${baseUrl} + ${path}` }, extracted: {} };
+    return { result: { ...base, status: 'error', error: `URL tidak valid: ${baseUrl} + ${path}` }, extracted: {}, extractedTypes: {} };
   }
   const shownHeaders = maskHeaders(headers, secrets);
   const shownBody = body === undefined ? undefined : maskSecrets(body, secrets);
   const request = { method, url: maskSecrets(url, secrets), headers: shownHeaders, body: shownBody };
   const curl = toCurl(method, request.url, shownHeaders, shownBody);
   if (missing.size) {
-    return { result: { ...base, status: 'error', request, curl, error: `Variabel belum punya nilai: ${[...missing].map((m) => `{{${m}}}`).join(', ')}` }, extracted: {} };
+    return { result: { ...base, status: 'error', request, curl, error: `Variabel belum punya nilai: ${[...missing].map((m) => `{{${m}}}`).join(', ')}` }, extracted: {}, extractedTypes: {} };
   }
 
   const started = Date.now();
@@ -289,7 +315,7 @@ async function runStep(step: QAStep, vars: Record<string, string>, ctx: RunConte
   } catch (e) {
     const err = e as Error;
     const why = err.name === 'TimeoutError' ? `Tidak ada respons dalam ${Math.round((ctx.env.timeoutMs || 30_000) / 1000)} detik.` : `Gagal terhubung: ${(err as { cause?: Error }).cause?.message ?? err.message}. Cek VPN dan base URL.`;
-    return { result: { ...base, status: 'error', durationMs: Date.now() - started, request, curl, error: why }, extracted: {} };
+    return { result: { ...base, status: 'error', durationMs: Date.now() - started, request, curl, error: why }, extracted: {}, extractedTypes: {} };
   }
   const text = await res.text().catch(() => '');
   const durationMs = Date.now() - started;
@@ -302,7 +328,7 @@ async function runStep(step: QAStep, vars: Record<string, string>, ctx: RunConte
     json = undefined;
   }
 
-  const { values, missing: notExtracted } = extractVars(step, json, resHeaders);
+  const { values, types: extractedTypes, missing: notExtracted } = extractVars(step, json, resHeaders);
   for (const [name, value] of Object.entries(values)) if (isTokenName(name)) secrets.push(value);
 
   // Expected values may reference earlier results, e.g. $.data.orderId equals "{{orderId}}".
@@ -341,6 +367,7 @@ async function runStep(step: QAStep, vars: Record<string, string>, ctx: RunConte
       ...(dbChecks.length ? { dbChecks } : {}),
     },
     extracted: values,
+    extractedTypes,
   };
 }
 
@@ -354,6 +381,9 @@ export async function runFlow(flow: QAFlow, flowIndex: number, ctx: RunContext):
   for (const [k, v] of Object.entries({ ...(flow.variables ?? {}), ...ctx.env.variables })) vars[k] = interpolate(v, vars);
   // Data created earlier in the run beats sample values; test credentials still win.
   Object.assign(vars, ctx.carried?.values ?? {}, secretVars);
+  // Extracted values keep their JSON type; a test credential is whatever the step's cast says.
+  const types: Record<string, VarType> = { ...(ctx.carried?.types ?? {}) };
+  for (const k of Object.keys(secretVars)) delete types[k];
   const steps: QAStepResult[] = [];
   let stopped: string | undefined;
 
@@ -382,9 +412,13 @@ export async function runFlow(flow: QAFlow, flowIndex: number, ctx: RunContext):
       ctx.onStep?.(flowIndex, r);
       continue;
     }
-    const { result, extracted } = await runStep(step, vars, ctx, secrets);
+    const { result, extracted, extractedTypes } = await runStep(step, vars, types, ctx, secrets);
     Object.assign(vars, extracted);
-    if (ctx.carried) for (const [k, v] of Object.entries(extracted)) (ctx.carried.values[k] = v), (ctx.carried.from[k] = flow.name);
+    Object.assign(types, extractedTypes);
+    if (ctx.carried) {
+      ctx.carried.types ??= {};
+      for (const [k, v] of Object.entries(extracted)) (ctx.carried.values[k] = v), (ctx.carried.from[k] = flow.name), (ctx.carried.types[k] = extractedTypes[k]);
+    }
     steps.push(result);
     ctx.onStep?.(flowIndex, result);
     if (result.status !== 'passed') stopped = `Dilewati karena step "${step.name}" ${result.status === 'blocked' ? 'diblokir' : 'gagal'}.`;

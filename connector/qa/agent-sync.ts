@@ -3,7 +3,7 @@ import type { AgentTaskStatus, AgentTaskStore } from '../agent-tasks.ts';
 
 const TERMINAL = new Set<AgentTaskStatus>(['completed', 'failed', 'cancelled']);
 const STATUS: Record<QAAgentJob['status'], AgentTaskStatus> = { queued: 'queued', running: 'running', done: 'completed', error: 'failed', cancelled: 'cancelled' };
-const ROLE: Record<QAAgentJob['role'], string> = { plan: 'Perencana', write: 'Penulis', repair: 'Perbaikan' };
+const ROLE: Record<QAAgentJob['role'], string> = { plan: 'Perencana', write: 'Penulis', repair: 'Perbaikan', fix: 'Perbaikan AI' };
 
 /** Keeps an E2E pipeline agent (planner, writer per stage, repairer) visible in Agent Tasks (kind `e2e`). */
 export async function syncQaAgent(store: Pick<AgentTaskStore, 'get' | 'create' | 'update'>, job: QAAgentJob, projectName: string): Promise<string> {

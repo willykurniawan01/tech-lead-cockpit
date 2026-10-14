@@ -213,6 +213,52 @@ describe('E2E multi-agent pipeline', () => {
     expect(suite!.flows.find((f) => f.id === 'buggy')!.steps[0].request.path).toBe('/v1/promo');
     expect(suite!.suspects).toEqual([expect.objectContaining({ flowId: 'buggy', title: 'Promo tidak tersimpan', service: 'core-promo', runId })]);
   });
+
+  it('fixes flows by instruction in small batches, keeps ids and stage, and can undo', async () => {
+    const m = manager();
+    const flow = (id: string, msisdn: unknown) => ({
+      id,
+      name: `Reserve ${id}`,
+      description: '',
+      category: 'happy-path',
+      taskTitles: [],
+      enabled: true,
+      stage: '2. Reserve promo',
+      variables: {},
+      steps: [{ id: `${id}-s`, name: 'reserve', service: 'core-promo', request: { method: 'POST', path: '/v1/promo/reserve', headers: {}, query: {}, body: { msisdn, amount: '{{amount}}' } }, assertions: [{ type: 'status', op: 'equals', expected: 200 }], extract: {} }],
+    });
+    const flows = Array.from({ length: 7 }, (_, i) => flow(`f${i}`, i === 6 ? '{{msisdn|string}}' : 81234567890)) as unknown as QAFlow[];
+    await m.saveSuite({ projectId: 'proj', projectName: 'Promo', ai: AI, updatedAt: '', flows });
+    // The agent fixes msisdn in the flows it got (dropping a step id), and returns f6 unchanged.
+    reply = (p) => {
+      const sent = JSON.parse(p.slice(p.indexOf('## Test case (JSON)') + 20).split('\n## ')[0]) as QAFlow[];
+      return JSON.stringify({
+        flows: sent.map((f) => ({ ...f, steps: f.steps.map(({ id: _id, ...s }) => ({ ...s, request: { ...s.request, body: { ...(s.request.body as object), msisdn: '{{msisdn|string}}' } } })) })),
+        changes: sent.map((f) => ({ flowId: f.id, summary: 'msisdn jadi string (dto/reserve.go:12)' })),
+      });
+    };
+    await expect(m.fixFlows('proj', { flowIds: ['f0'], instruction: '  ' })).rejects.toThrow('Tulis instruksi');
+    const p = await m.fixFlows('proj', { flowIds: flows.map((f) => f.id), instruction: 'msisdn harus string' });
+    expect(p.agents.map((a) => a.role)).toEqual(['fix', 'fix']);
+    await settle(m);
+    expect(prompts[0]).toContain('## Instruksi Tech Lead\nmsisdn harus string');
+    expect(prompts[0]).toContain('BACA struct request');
+    const suite = (await m.getSuite('proj'))!;
+    const f0 = suite.flows[0];
+    expect((f0.steps[0].request.body as { msisdn: string }).msisdn).toBe('{{msisdn|string}}');
+    expect(f0.steps[0].id).toBe('f0-s');
+    expect(f0.stage).toBe('2. Reserve promo');
+    expect(f0.repairNote).toBe('Diperbaiki AI: msisdn jadi string (dto/reserve.go:12)');
+    // f6 already had it: unchanged, so not in the undo either.
+    expect(suite.flows[6].repairNote).toBeUndefined();
+    expect(suite.undo).toMatchObject({ label: 'msisdn harus string' });
+    expect(suite.undo!.flows.map((f) => f.id)).toEqual(['f0', 'f1', 'f2', 'f3', 'f4', 'f5']);
+
+    const back = await m.undoFix('proj');
+    expect((back.flows[0].steps[0].request.body as { msisdn: number }).msisdn).toBe(81234567890);
+    expect(back.undo).toBeUndefined();
+    await expect(m.undoFix('proj')).rejects.toThrow('Tidak ada perbaikan AI');
+  });
 });
 
 describe('evidenceMentions', () => {

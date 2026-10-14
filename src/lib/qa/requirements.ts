@@ -41,7 +41,7 @@ export interface E2ERequirements {
   todo: number;
 }
 
-const VAR = /\{\{\s*([$\w.-]+)\s*\}\}/g;
+const VAR = /\{\{\s*([$\w.-]+)\s*(?:\|\s*\w+\s*)?\}\}/g;
 const SENSITIVE = /pass(word)?|\bpin\b|pin$|^pin|otp|secret|token|api.?key|signature|private|credential/i;
 
 function names(value: unknown, out: Set<string>) {
