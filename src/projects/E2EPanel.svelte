@@ -14,6 +14,7 @@
   import E2ELogViewer from './E2ELogViewer.svelte';
   import FlowEditor from './FlowEditor.svelte';
   import E2EPipeline from './E2EPipeline.svelte';
+  import E2ERequirements from './E2ERequirements.svelte';
   import { bugs } from '../lib/bugs/client';
   import { projectDrafts, projectTasks, prdContext } from './project-tasks';
   import { loadServicesRoot } from '../tad/generator-client';
@@ -512,6 +513,9 @@
   {/if}
 
   <E2EPipeline projectId={project.id} bind:plan bind:pipeline existingFlows={suite?.flows.length ?? 0} onsuite={reloadSuite} />
+
+  <!-- The keys the selected environment still needs for the flows that will run. -->
+  <E2ERequirements flows={enabledFlows} {env} bind:environments onopenenv={() => (envModalOpen = true)} />
 
   <div class="tabs">
     <button class:active={tab === 'flows'} onclick={() => (tab = 'flows')}>Skenario ({suite?.flows.length ?? 0})</button>
