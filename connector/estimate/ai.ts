@@ -1,4 +1,5 @@
 import { roundEffort, ROLE_LABELS, type AiEffort, type Confidence, type EstimateRequest } from '../../src/lib/estimate/types.ts';
+import { extractJson } from '../ai-json.ts';
 
 /**
  * Prompt and parser for the AI's effort proposal. The AI only suggests man-days, confidence and
@@ -53,17 +54,7 @@ export interface ParsedEstimate {
 
 /** Validates the AI's JSON against the requested tasks (in prompt order); unknown tasks and self-dependencies are dropped. */
 export function parseEstimateReply(reply: string, tasks: { id: string; title: string }[]): ParsedEstimate {
-  const fenced = reply.match(/```(?:json)?\s*([\s\S]*?)```/i)?.[1];
-  const text = (fenced ?? reply).trim();
-  const start = text.indexOf('{');
-  const end = text.lastIndexOf('}');
-  if (start < 0 || end <= start) throw new Error('Jawaban AI tidak berisi JSON.');
-  let json: { tasks?: unknown; notes?: unknown };
-  try {
-    json = JSON.parse(text.slice(start, end + 1).replace(/,(\s*[}\]])/g, '$1'));
-  } catch (e) {
-    throw new Error(`JSON dari AI tidak valid: ${(e as Error).message}`);
-  }
+  const json = (extractJson(reply) ?? {}) as { tasks?: unknown; notes?: unknown };
   // A title only identifies a task when no other task in the project has the same title.
   const counts = new Map<string, number>();
   for (const t of tasks) counts.set(norm(t.title), (counts.get(norm(t.title)) ?? 0) + 1);

@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { extractJson } from '../ai-json.ts';
 import { assertReadOnlySql } from './db.ts';
 import {
   QA_CATEGORIES,
@@ -19,6 +20,8 @@ import {
  * access); everything it returns is validated and normalised here before the UI or the runner
  * sees it, so a malformed or hostile answer cannot smuggle in hosts or unknown fields.
  */
+
+export { extractJson, repairJson } from '../ai-json.ts';
 
 export const MAX_SPEC_CHARS = 60_000;
 /** Tasks per generate/plan request; more is refused rather than cut (a cut task is a missing stage). */
@@ -192,30 +195,6 @@ export function buildQaPrompt(req: QAGenerateRequest): string {
   ].join('\n');
 }
 
-/** The first JSON object in the reply, tolerating a markdown fence or prose around it. */
-export function extractJson(reply: string): unknown {
-  const fenced = reply.match(/```(?:json)?\s*([\s\S]*?)```/i)?.[1];
-  const text = (fenced ?? reply).trim();
-  const start = text.indexOf('{');
-  const end = text.lastIndexOf('}');
-  if (start < 0 || end <= start) throw new Error('Jawaban AI tidak berisi JSON.');
-  const json = repairJson(text.slice(start, end + 1));
-  try {
-    return JSON.parse(json);
-  } catch (e) {
-    const at = Number((e as Error).message.match(/position (\d+)/)?.[1]);
-    const near = Number.isFinite(at) ? ` Di sekitar: …${json.slice(Math.max(0, at - 60), at + 40).replace(/\s+/g, ' ')}…` : '';
-    throw new Error(`JSON dari AI tidak valid: ${(e as Error).message}.${near}`);
-  }
-}
-
-/**
- * Fixes what models commonly get wrong: a bare {{variable}} as a JSON value (the runner turns a
- * quoted lone variable back into a number when it holds one) and trailing commas.
- */
-export function repairJson(text: string): string {
-  return text.replace(/([:\[,]\s*)(\{\{\s*[$\w.-]+\s*\}\})(?=\s*[,}\]])/g, '$1"$2"').replace(/,(\s*[}\]])/g, '$1');
-}
 
 const str = (v: unknown, max = 500): string => (typeof v === 'string' ? v.trim().slice(0, max) : typeof v === 'number' ? String(v) : '');
 

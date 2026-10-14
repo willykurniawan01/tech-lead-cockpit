@@ -1,4 +1,5 @@
 import { bugTicketTitle, profileForRepo, type BugAnalysis, type BugCase, type BugChatMessage, type BugEvidence, type BugSeverity, type BugTask, type BugTaskProposal, type Confidence } from '../../src/lib/bugs/types.ts';
+import { extractJson } from '../ai-json.ts';
 
 /**
  * Prompt and parser for the bug trace. The AI reads the report, the redacted logs (in logs/ of
@@ -138,17 +139,7 @@ function parseTasks(raw: unknown, known: Set<string>, fallback: BugTaskProposal 
 }
 
 export function parseBugReply(reply: string, knownServices: string[]): Omit<BugAnalysis, 'at' | 'ai' | 'touchedRepos'> {
-  const fenced = reply.match(/```(?:json)?\s*([\s\S]*?)```/i)?.[1];
-  const text = (fenced ?? reply).trim();
-  const start = text.indexOf('{');
-  const end = text.lastIndexOf('}');
-  if (start < 0 || end <= start) throw new Error('Jawaban AI tidak berisi JSON.');
-  let j: Record<string, unknown>;
-  try {
-    j = JSON.parse(text.slice(start, end + 1).replace(/,(\s*[}\]])/g, '$1'));
-  } catch (e) {
-    throw new Error(`JSON dari AI tidak valid: ${(e as Error).message}`);
-  }
+  const j = (extractJson(reply) ?? {}) as Record<string, unknown>;
   const rootCause = str(j.rootCause, 6_000);
   if (!rootCause) throw new Error('AI tidak menyebutkan root cause.');
   const known = new Set(knownServices.map((s) => s.toLowerCase()));

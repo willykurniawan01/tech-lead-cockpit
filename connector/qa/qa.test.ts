@@ -201,6 +201,14 @@ describe('generator', () => {
     expect(fixed.flows[0].steps[0].request.body).toEqual({ amount: '{{amount}}', ids: ['{{id}}'] });
     // Variables inside strings are untouched.
     expect(repairJson('{"path":"/o/{{id}}"}')).toBe('{"path":"/o/{{id}}"}');
+    // A note listing variables is text, also next to commas, escaped quotes and a broken value elsewhere.
+    const note = 'Variabel aktor ({{actorCreator}}, {{actorApprover1}}, {{actorApprover2}}) dan \\"{{x}}\\", ]';
+    expect(repairJson(`{"notes":"${note}","flows":[{"v": {{amount}},}]}`)).toBe(`{"notes":"${note}","flows":[{"v": "{{amount}}"}]}`);
+  });
+
+  it('takes valid JSON as is, without repairing it', () => {
+    const reply = JSON.stringify({ notes: 'pakai ({{a}}, {{b}}, {{c}}) dari tahap 4', flows: [] });
+    expect(extractJson(reply)).toEqual({ notes: 'pakai ({{a}}, {{b}}, {{c}}) dari tahap 4', flows: [] });
   });
 
   it('fails clearly without JSON or flows', () => {
