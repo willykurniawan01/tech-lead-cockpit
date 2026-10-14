@@ -252,7 +252,8 @@ describe('E2E multi-agent pipeline', () => {
     // f6 already had it: unchanged, so not in the undo either.
     expect(suite.flows[6].repairNote).toBeUndefined();
     expect(suite.undo).toMatchObject({ label: 'msisdn harus string' });
-    expect(suite.undo!.flows.map((f) => f.id)).toEqual(['f0', 'f1', 'f2', 'f3', 'f4', 'f5']);
+    // Batches finish in any order.
+    expect(suite.undo!.flows.map((f) => f.id).sort()).toEqual(['f0', 'f1', 'f2', 'f3', 'f4', 'f5']);
 
     const back = await m.undoFix('proj');
     expect((back.flows[0].steps[0].request.body as { msisdn: number }).msisdn).toBe(81234567890);
