@@ -95,14 +95,16 @@ describe('BugManager', () => {
   let aiFolder: { files: string[]; log: string } | null = null;
   let aiReply = reply();
   let jiraCalls: unknown[] = [];
+  let prompts: string[] = [];
   const manager = () =>
     new BugManager({
       dir,
       resolveServicesRoot: async (i) => i || '/Users/x/Services',
       listServices: async () => ['core-promo-ultimate'],
       watchRepos: async () => async () => [],
-      runAi: (_ai, _prompt, opts) => ({
+      runAi: (_ai, prompt, opts) => ({
         done: (async () => {
+          prompts.push(prompt);
           aiFolder = { files: await readdir(join(opts.cwd, 'logs')), log: await readFile(join(opts.cwd, 'logs', 'app.log'), 'utf8') };
           return { reply: aiReply };
         })(),
@@ -119,6 +121,7 @@ describe('BugManager', () => {
     aiFolder = null;
     aiReply = reply();
     jiraCalls = [];
+    prompts = [];
   });
   afterEach(() => rm(dir, { recursive: true, force: true }));
 
@@ -174,6 +177,45 @@ describe('BugManager', () => {
     await m.remove(c.id);
     expect(await m.list()).toEqual([]);
     expect(m.jobsList()).toEqual([]);
+  });
+
+  it('discusses a case with the agent, and re-traces with the discussion', async () => {
+    const m = manager();
+    const c = await m.create({ title: 'Reserve promo gagal', serviceHint: 'core-promo-ultimate' });
+    await m.addLog(c.id, 'app.log', 'ERROR reserve failed token=abc123secret');
+    const ai = { provider: 'claude' as const, model: 'x' };
+    const trace = await m.analyze({ caseId: c.id, ai, useCodebase: true });
+    await until(async () => m.job(trace.id)?.status !== 'running');
+
+    await expect(m.chat({ caseId: c.id, text: '  ', ai, useCodebase: true })).rejects.toThrow('pertanyaan');
+    aiReply = 'Ya, `ReserveQuota` juga dipanggil dari **refund** (core-promo-ultimate/internal/refund.go:40).';
+    const job = await m.chat({ caseId: c.id, text: 'Apakah refund ikut terdampak?', ai, useCodebase: true });
+    expect(job).toMatchObject({ kind: 'chat', status: 'running' });
+    await until(async () => m.job(job.id)?.status !== 'running');
+    expect(m.job(job.id)?.status).toBe('done');
+    // The agent saw the analysis, the question and the redacted logs (never the secret).
+    const asked = prompts[prompts.length - 1];
+    expect(asked).toContain('## Analisis saat ini');
+    expect(asked).toContain('Apakah refund ikut terdampak?');
+    expect(asked).not.toContain('abc123secret');
+    expect(aiFolder?.log).toContain('token=***');
+    const saved = await m.get(c.id);
+    expect(saved.chat?.map((x) => [x.role, x.text.slice(0, 18), x.model])).toEqual([
+      ['user', 'Apakah refund ikut', undefined],
+      ['assistant', 'Ya, `ReserveQuota`', 'claude/x'],
+    ]);
+    // The trace and the discussion have their own latest job.
+    expect(m.latestJob(c.id)?.id).toBe(trace.id);
+    expect(m.latestJob(c.id, 'chat')?.id).toBe(job.id);
+
+    // A re-trace can take the discussion's conclusions along.
+    aiReply = reply();
+    const again = await m.analyze({ caseId: c.id, ai, useCodebase: true, withChat: true });
+    await until(async () => m.job(again.id)?.status !== 'running');
+    expect(prompts[prompts.length - 1]).toContain('Diskusi Tech Lead dengan agent');
+    expect(prompts[prompts.length - 1]).toContain('internal/refund.go:40');
+
+    expect((await m.clearChat(c.id)).chat).toEqual([]);
   });
 
   it('refuses tickets, fixes and tasks before the tracing agent has analysed the bug', async () => {

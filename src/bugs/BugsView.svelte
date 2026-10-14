@@ -9,6 +9,7 @@
   import { loadAiSelection } from '../lib/ai/providers.svelte';
   import type { AiSelection } from '../lib/ai/types';
   import { bugs } from '../lib/bugs/client';
+  import { renderPreview } from '../lib/markdown/preview';
   import { STATUS_LABELS, TASK_STATUS_LABELS, bugDraftId, type BugCase, type BugCaseInput, type BugJob, type BugTask, type BugTaskProposal } from '../lib/bugs/types';
   import { jira } from '../lib/jira/client';
   import type { JiraProject } from '../lib/jira/types';
@@ -36,6 +37,12 @@
   let useCodebase = $state(true);
   let instructions = $state('');
   let job = $state<BugJob | null>(null);
+
+  // Discussion with the tracing agent about the case (answered in the background).
+  let chatText = $state('');
+  let chatJob = $state<BugJob | null>(null);
+  const answering = $derived(chatJob?.status === 'running');
+  const QUICK = ['Kenapa yakin itu akar masalahnya? Tunjukkan buktinya.', 'Apakah ada service atau fitur lain yang ikut terdampak?', 'Bagaimana cara mereproduksi bug ini di staging?', 'Apa risiko rencana fix ini?'];
 
   // Tasks from the analysis: Jira settings shared by all tasks, edits kept per task until saved.
   let projects = $state<JiraProject[]>([]);
@@ -110,6 +117,17 @@
     busy = {};
     openTask = null;
     job = null;
+    chatJob = null;
+    chatText = '';
+    void bugs
+      .latestChatJob(c.id)
+      .then((j) => {
+        if (j?.status === 'running' && current?.id === c.id) {
+          chatJob = j;
+          void pollChat(j.id);
+        }
+      })
+      .catch(() => {});
     try {
       const j = await bugs.latestJob(c.id);
       if (j?.status === 'running' && current?.id === c.id) {
@@ -255,6 +273,64 @@
       const fresh = await bugs.get(caseId!).catch(() => null);
       if (fresh) replace(fresh);
       return;
+    }
+  }
+
+  /** Sends a question to the discussion; the answer comes back in the background. */
+  async function sendChat(text = chatText) {
+    if (!current || !text.trim()) return;
+    if (dirty) await save();
+    try {
+      chatJob = await bugs.chat({ caseId: current.id, text: text.trim(), ai, useCodebase, servicesRoot });
+      chatText = '';
+      // Show the question right away; the case on disk has it too.
+      replace({ ...current, chat: [...(current.chat ?? []), { id: `local-${Date.now()}`, role: 'user', text: text.trim(), at: new Date().toISOString() }] });
+      void pollChat(chatJob.id);
+    } catch (e) {
+      toasts.show((e as Error).message, 'err');
+    }
+  }
+
+  async function pollChat(id: string) {
+    const caseId = current?.id;
+    while (current?.id === caseId) {
+      await sleep(POLL_MS);
+      const j = await bugs.job(id).catch(() => null);
+      if (!j || current?.id !== caseId) return;
+      chatJob = j;
+      if (j.status === 'running') continue;
+      const fresh = await bugs.get(caseId!).catch(() => null);
+      if (fresh) replace(fresh);
+      if (j.status === 'error') toasts.show(`Agent gagal menjawab: ${j.error}`, 'err', 6000);
+      return;
+    }
+  }
+
+  async function cancelChat() {
+    if (chatJob) chatJob = await bugs.cancel(chatJob.id).catch(() => chatJob);
+  }
+
+  async function clearChat() {
+    if (!current?.chat?.length) return;
+    if (!(await confirmDialog({ title: 'Hapus diskusi?', message: 'Semua pesan diskusi kasus ini dihapus. Analisa dan task tidak berubah.', confirmText: 'Hapus', danger: true }))) return;
+    try {
+      replace(await bugs.clearChat(current.id));
+    } catch (e) {
+      toasts.show((e as Error).message, 'err');
+    }
+  }
+
+  /** Re-traces with the discussion's conclusions passed to the agent. */
+  async function retraceWithChat() {
+    if (!current) return;
+    if (!(await confirmDialog({ title: 'Trace ulang memakai diskusi?', message: 'Agent menelusuri ulang dengan kesimpulan diskusi ini. Usulan task diganti; task yang sudah punya tiket atau sedang diperbaiki tetap.', confirmText: 'Trace ulang' }))) return;
+    try {
+      job = await bugs.analyze({ caseId: current.id, ai, useCodebase, servicesRoot, instructions, withChat: true });
+      replace({ ...current, status: 'analyzing' });
+      toasts.show('Trace ulang memakai diskusi berjalan di background.', 'info', 4000);
+      void poll(job.id);
+    } catch (e) {
+      toasts.show((e as Error).message, 'err');
     }
   }
 
@@ -543,6 +619,40 @@
           {:else if !analyzing}
             <p class="muted small">Isi laporan dan tambahkan log, lalu kirim ke agent tracing. Agent menelusuri bug di background dan menghasilkan analisa beserta usulan task.</p>
           {/if}
+        </section>
+
+        <!-- Discussion -->
+        <section class="card chat">
+          <div class="section-head">
+            <h3><Icon name="chat" size={14} /> Diskusi dengan agent{current.chat?.length ? ` (${current.chat.length})` : ''}</h3>
+            <div class="row">
+              {#if current.chat?.some((m) => m.role === 'assistant')}<button class="btn btn-sm" onclick={retraceWithChat} disabled={analyzing || answering} title="Telusuri ulang dengan kesimpulan diskusi ini"><Icon name="refresh" size={12} /> Trace ulang memakai diskusi</button>{/if}
+              {#if current.chat?.length}<button class="btn btn-ghost btn-sm" onclick={clearChat} disabled={answering}>Hapus diskusi</button>{/if}
+            </div>
+          </div>
+          <p class="muted small">Tanya lanjutan tentang bug ini. Agent membaca laporan, log (disensor), hasil analisa, dan riwayat diskusi{useCodebase ? ', serta codebase (hanya baca)' : ''}. Jawaban diproses di background.</p>
+          <div class="messages">
+            {#each current.chat ?? [] as m (m.id)}
+              <div class="msg" class:me={m.role === 'user'}>
+                <div class="who small muted">{m.role === 'user' ? 'Kamu' : `Agent${m.model ? ` · ${m.model}` : ''}`} · {new Date(m.at).toLocaleString('id-ID', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })}</div>
+                {#if m.role === 'assistant'}<div class="md">{@html renderPreview(m.text).html}</div>{:else}<p class="pre">{m.text}</p>{/if}
+              </div>
+            {:else}
+              <div class="quick">
+                {#each QUICK as qx (qx)}<button class="chip-btn small" onclick={() => sendChat(qx)} disabled={analyzing}>{qx}</button>{/each}
+              </div>
+            {/each}
+            {#if answering}<div class="msg"><div class="small muted"><Icon name="sparkles" size={12} /> Agent sedang menjawab… {chatJob?.progress ?? ''}</div><button class="btn btn-ghost btn-sm" onclick={cancelChat}>Batalkan</button></div>{/if}
+            {#if chatJob?.status === 'error'}<p class="small err-text">Agent gagal menjawab: {chatJob.error}</p>{/if}
+          </div>
+          <div class="composer">
+            <textarea class="input" rows="2" bind:value={chatText} placeholder="Tanya agent, mis. apakah bug ini juga terjadi di endpoint refund? (⌘/Ctrl+Enter untuk kirim)" onkeydown={(e) => (e.key === 'Enter' && (e.metaKey || e.ctrlKey) ? (e.preventDefault(), void sendChat()) : undefined)} disabled={answering}></textarea>
+            <div class="row">
+              <label class="small"><input type="checkbox" bind:checked={useCodebase} /> boleh baca codebase</label>
+              <AiPicker value={ai} onchange={(v) => (ai = v)} disabled={answering} />
+              <button class="btn btn-primary btn-sm" onclick={() => sendChat()} disabled={answering || analyzing || !chatText.trim()}><Icon name="send" size={12} /> Kirim</button>
+            </div>
+          </div>
         </section>
 
         <!-- 4. Tasks -->
@@ -886,6 +996,63 @@
   .err {
     color: var(--err);
     margin: 0;
+  }
+  .chat .messages {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    max-height: 520px;
+    overflow: auto;
+    margin: 8px 0;
+  }
+  .chat .msg {
+    align-self: flex-start;
+    max-width: 92%;
+    padding: 8px 10px;
+    border-radius: var(--radius-sm);
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+  }
+  .chat .msg.me {
+    align-self: flex-end;
+    background: var(--accent-soft, var(--surface-2));
+  }
+  .chat .msg .pre {
+    margin: 2px 0 0;
+    white-space: pre-wrap;
+  }
+  .chat .md :global(pre) {
+    overflow: auto;
+  }
+  .chat .quick {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  .chat .quick .chip-btn {
+    border: 1px solid var(--border);
+    background: var(--surface);
+    border-radius: 999px;
+    padding: 3px 10px;
+    cursor: pointer;
+    text-align: left;
+    font: inherit;
+    font-size: 12px;
+  }
+  .chat .quick .chip-btn:hover {
+    border-color: var(--accent);
+  }
+  .chat .composer {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .chat .composer .row,
+  .chat .section-head .row {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    flex-wrap: wrap;
   }
   .analysis {
     display: flex;

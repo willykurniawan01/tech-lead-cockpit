@@ -3,8 +3,8 @@ import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { AiSelection } from '../../src/lib/ai/types.ts';
-import { bugTicketTitle, profileForRepo, type BugAnalysis, type BugAnalyzeRequest, type BugCase, type BugCaseInput, type BugJob, type BugTask, type BugTaskProposal, type BugTaskStatus, type BugTicketRequest } from '../../src/lib/bugs/types.ts';
-import { buildBugPrompt, parseBugReply } from './analysis.ts';
+import { bugTicketTitle, profileForRepo, type BugAnalysis, type BugAnalyzeRequest, type BugCase, type BugChatMessage, type BugChatRequest, type BugCaseInput, type BugJob, type BugTask, type BugTaskProposal, type BugTaskStatus, type BugTicketRequest } from '../../src/lib/bugs/types.ts';
+import { buildBugPrompt, buildChatPrompt, chatTranscript, parseBugReply } from './analysis.ts';
 import { logExcerpt, redactLog } from './redact.ts';
 import { DATA_DIR } from '../paths.ts';
 
@@ -21,6 +21,8 @@ const LOG_NAME = /^[\w.() -]{1,100}$/;
 export const MAX_LOG_BYTES = 10 * 1024 * 1024;
 const MAX_CASE_LOG_BYTES = 40 * 1024 * 1024;
 const TIMEOUT_MS = 15 * 60_000;
+/** Messages kept per case discussion (oldest dropped). */
+const MAX_CHAT = 200;
 
 export class BugInputError extends Error {}
 
@@ -147,9 +149,10 @@ export class BugManager {
       if (first && c.coderRunIds?.length) Object.assign(first, { coderRunIds: [...c.coderRunIds], status: c.status === 'fixed' ? 'fixed' : 'fixing' });
     }
     c.coderRunIds ??= [];
+    c.chat ??= [];
     // Proposals made before titles followed the task format get it too (tickets already filed keep theirs).
     for (const t of c.tasks) if (!t.jira) t.jiraSummary = bugTicketTitle(t.jiraSummary || t.title, t.repo, t.profile);
-    if (c.status === 'analyzing' && ![...this.jobs.values()].some((j) => j.caseId === c.id && j.status === 'running')) c.status = c.analysis ? 'analyzed' : 'draft';
+    if (c.status === 'analyzing' && ![...this.jobs.values()].some((j) => j.caseId === c.id && (j.kind ?? 'trace') === 'trace' && j.status === 'running')) c.status = c.analysis ? 'analyzed' : 'draft';
     if (c.status !== 'analyzing') c.status = deriveStatus(c);
     return c;
   }
@@ -219,6 +222,7 @@ export class BugManager {
   async analyze(req: BugAnalyzeRequest): Promise<BugJob> {
     const c = await this.get(req.caseId);
     const busy = [...this.jobs.values()].find((j) => j.caseId === c.id && j.status === 'running');
+    if (busy?.kind === 'chat') throw new BugInputError('Agent masih menjawab diskusi; tunggu atau batalkan dulu.');
     if (busy) return this.public(busy);
     let servicesRoot: string | undefined;
     let services: string[] = [];
@@ -231,20 +235,14 @@ export class BugManager {
       }
     }
 
-    // The AI's folder: the report and redacted logs, nothing else.
-    const cwd = await mkdtemp(join(tmpdir(), 'tlc-bug-'));
-    await mkdir(join(cwd, 'logs'));
-    const excerpts: { name: string; excerpt: string }[] = [];
-    for (const l of c.logs) {
-      const raw = await readFile(join(this.logDir(c.id), l.name), 'utf8').catch(() => '');
-      const red = redactLog(raw);
-      await writeFile(join(cwd, 'logs', l.name), red);
-      excerpts.push({ name: l.name, excerpt: logExcerpt(red) });
-    }
-    const prompt = buildBugPrompt(c, { servicesRoot, logExcerpts: excerpts, instructions: req.instructions });
+    const { cwd, excerpts } = await this.workspace(c);
+    // The discussion's conclusions shape a re-trace when asked.
+    const discussion = req.withChat && c.chat?.length ? `Diskusi Tech Lead dengan agent tentang bug ini (pakai kesimpulannya):\n${chatTranscript(c.chat, 20_000)}` : '';
+    const instructions = [req.instructions?.trim(), discussion].filter(Boolean).join('\n\n');
+    const prompt = buildBugPrompt(c, { servicesRoot, logExcerpts: excerpts, instructions });
     await writeFile(join(cwd, 'BUG.md'), prompt);
 
-    const job: BugJob & { cancel?: () => void } = { id: randomUUID(), caseId: c.id, caseTitle: c.title, status: 'running', startedAt: new Date().toISOString(), progress: 'Menyiapkan…' };
+    const job: BugJob & { cancel?: () => void } = { id: randomUUID(), caseId: c.id, caseTitle: c.title, kind: 'trace', status: 'running', startedAt: new Date().toISOString(), progress: 'Menyiapkan…' };
     this.jobs.set(job.id, job);
     c.status = 'analyzing';
     await this.save(c);
@@ -288,6 +286,84 @@ export class BugManager {
     return this.public(job);
   }
 
+  /** The AI's working folder: the redacted logs (logs/) and their excerpts, nothing else. */
+  private async workspace(c: BugCase): Promise<{ cwd: string; excerpts: { name: string; excerpt: string }[] }> {
+    const cwd = await mkdtemp(join(tmpdir(), 'tlc-bug-'));
+    await mkdir(join(cwd, 'logs'));
+    const excerpts: { name: string; excerpt: string }[] = [];
+    for (const l of c.logs) {
+      const raw = await readFile(join(this.logDir(c.id), l.name), 'utf8').catch(() => '');
+      const red = redactLog(raw);
+      await writeFile(join(cwd, 'logs', l.name), red);
+      excerpts.push({ name: l.name, excerpt: logExcerpt(red) });
+    }
+    return { cwd, excerpts };
+  }
+
+  // Discussion -------------------------------------------------------------------------------
+
+  /**
+   * A question in the case's discussion: the Tech Lead's message is kept, and the tracing agent
+   * answers in the background (report, redacted logs, analysis, earlier messages and, when
+   * allowed, the codebase read-only). One answer at a time per case, not during a trace.
+   */
+  async chat(req: BugChatRequest): Promise<BugJob> {
+    const c = await this.get(req.caseId);
+    const text = clean(req.text, 8_000);
+    if (!text) throw new BugInputError('Tulis pertanyaannya dulu.');
+    const busy = [...this.jobs.values()].find((j) => j.caseId === c.id && j.status === 'running');
+    if (busy) throw new BugInputError(busy.kind === 'chat' ? 'Agent masih menjawab pertanyaan sebelumnya.' : 'Agent tracing masih berjalan; tunggu analisanya selesai.');
+    let servicesRoot: string | undefined;
+    if (req.useCodebase) {
+      try {
+        servicesRoot = await this.deps.resolveServicesRoot(req.servicesRoot ?? '');
+      } catch (e) {
+        throw new BugInputError((e as Error).message);
+      }
+    }
+    const { cwd, excerpts } = await this.workspace(c);
+    const prompt = buildChatPrompt(c, { servicesRoot, logExcerpts: excerpts, question: text });
+    const asked: BugChatMessage = { id: randomUUID(), role: 'user', text, at: new Date().toISOString() };
+    c.chat = [...(c.chat ?? []), asked].slice(-MAX_CHAT);
+    await this.save(c);
+
+    const job: BugJob & { cancel?: () => void } = { id: randomUUID(), caseId: c.id, caseTitle: c.title, kind: 'chat', status: 'running', startedAt: new Date().toISOString(), progress: 'Agent membaca…' };
+    this.jobs.set(job.id, job);
+    const run = this.deps.runAi(req.ai, prompt, { cwd, timeoutMs: TIMEOUT_MS, readOnlyDirs: servicesRoot ? [servicesRoot] : [], onProgress: (t) => (job.progress = t.slice(0, 200)) });
+    job.cancel = run.cancel;
+    void run.done
+      .then(async (outcome) => {
+        if (job.status === 'cancelled') return;
+        if (outcome.error) throw new Error(outcome.error);
+        const reply = outcome.reply.trim();
+        if (!reply) throw new Error('Agent tidak memberi jawaban.');
+        const fresh = await this.get(c.id);
+        const model = req.ai.model ? `${req.ai.provider}/${req.ai.model}` : req.ai.provider;
+        fresh.chat = [...(fresh.chat ?? []), { id: randomUUID(), role: 'assistant' as const, text: reply.slice(0, 40_000), at: new Date().toISOString(), model }].slice(-MAX_CHAT);
+        await this.save(fresh);
+        job.status = 'done';
+      })
+      .catch((e: Error) => {
+        if (job.status === 'running') {
+          job.status = 'error';
+          job.error = e.message;
+        }
+      })
+      .finally(() => {
+        job.finishedAt ??= new Date().toISOString();
+        job.cancel = undefined;
+        void rm(cwd, { recursive: true, force: true });
+      });
+    return this.public(job);
+  }
+
+  /** Clears the case's discussion (not while the agent is answering). */
+  async clearChat(caseId: string): Promise<BugCase> {
+    const c = await this.get(caseId);
+    if ([...this.jobs.values()].some((j) => j.caseId === c.id && j.kind === 'chat' && j.status === 'running')) throw new BugInputError('Agent masih menjawab; batalkan dulu.');
+    return this.save({ ...c, chat: [] });
+  }
+
   private public(job: BugJob & { cancel?: () => void }): BugJob {
     const { cancel: _c, ...rest } = job;
     return rest;
@@ -303,8 +379,9 @@ export class BugManager {
     return [...this.jobs.values()].reverse().slice(0, limit).map((j) => this.public(j));
   }
 
-  latestJob(caseId: string): BugJob | undefined {
-    const all = [...this.jobs.values()].filter((j) => j.caseId === caseId);
+  /** The latest job of a case, of one kind (trace by default: the chat has its own). */
+  latestJob(caseId: string, kind: 'trace' | 'chat' = 'trace'): BugJob | undefined {
+    const all = [...this.jobs.values()].filter((j) => j.caseId === caseId && (j.kind ?? 'trace') === kind);
     return all.length ? this.public(all[all.length - 1]) : undefined;
   }
 
@@ -314,7 +391,7 @@ export class BugManager {
       j.status = 'cancelled';
       j.finishedAt = new Date().toISOString();
       j.cancel?.();
-      const c = await this.get(j.caseId).catch(() => null);
+      const c = j.kind === 'chat' ? null : await this.get(j.caseId).catch(() => null);
       if (c?.status === 'analyzing') await this.save({ ...c, status: c.analysis ? 'analyzed' : 'draft' });
     }
     return j && this.public(j);

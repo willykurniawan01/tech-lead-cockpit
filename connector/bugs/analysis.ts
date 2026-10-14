@@ -1,4 +1,4 @@
-import { bugTicketTitle, profileForRepo, type BugAnalysis, type BugCase, type BugEvidence, type BugSeverity, type BugTask, type BugTaskProposal, type Confidence } from '../../src/lib/bugs/types.ts';
+import { bugTicketTitle, profileForRepo, type BugAnalysis, type BugCase, type BugChatMessage, type BugEvidence, type BugSeverity, type BugTask, type BugTaskProposal, type Confidence } from '../../src/lib/bugs/types.ts';
 
 /**
  * Prompt and parser for the bug trace. The AI reads the report, the redacted logs (in logs/ of
@@ -38,6 +38,68 @@ export function buildBugPrompt(c: BugCase, opts: { servicesRoot?: string; logExc
       ? `## Cuplikan log (lengkapnya di logs/)\n${opts.logExcerpts.map((l) => `### ${l.name}\n${l.excerpt}`).join('\n\n')}`
       : '## Log\n(tidak ada log)',
     opts.instructions?.trim() ? `\n## Instruksi tambahan dari Tech Lead\n${opts.instructions.trim()}` : '',
+  ]
+    .filter((l) => l !== '')
+    .join('\n');
+}
+
+/** The discussion as text, newest last, within a budget (older messages drop first). */
+export function chatTranscript(chat: BugChatMessage[], budget = 30_000): string {
+  const lines: string[] = [];
+  let left = budget;
+  for (const m of [...chat].reverse()) {
+    const line = `${m.role === 'user' ? 'Tech Lead' : 'Agent'}: ${m.text}`;
+    if (line.length > left) break;
+    left -= line.length;
+    lines.unshift(line);
+  }
+  return lines.join('\n\n');
+}
+
+/**
+ * A question in a case's discussion: the agent answers in prose, reading the report, the redacted
+ * logs, the analysis so far and (when allowed) the codebase, read-only.
+ */
+export function buildChatPrompt(c: BugCase, opts: { servicesRoot?: string; logExcerpts: { name: string; excerpt: string }[]; question: string }): string {
+  const a = c.analysis;
+  const field = (label: string, v: string) => (v.trim() ? `${label}:\n${v.trim().slice(0, 4_000)}` : '');
+  return [
+    'Kamu agent yang menelusuri bug ini bersama Tech Lead. Jawab pertanyaan terakhir Tech Lead dengan jelas dan ringkas, dalam Bahasa Indonesia. JANGAN mengubah kode apa pun.',
+    '',
+    'Cara kerja:',
+    '- File log lengkap ada di folder logs/ (sudah disamarkan; *** = data sensitif).',
+    opts.servicesRoot
+      ? `- Codebase semua service ada di "${opts.servicesRoot}" (HANYA BACA). Buka file yang relevan bila perlu untuk menjawab, dan sebut file:baris sebagai bukti.`
+      : '- Codebase tidak tersedia untuk pertanyaan ini: jawab dari laporan, log, dan analisis.',
+    '- Bedakan fakta (terlihat di log/kode) dan dugaan. Bila analisis sebelumnya ternyata keliru atau perlu diubah, katakan dengan jelas apa yang berubah dan sarankan "Trace ulang memakai diskusi".',
+    '- Jawab dengan teks biasa (markdown boleh), bukan JSON.',
+    '',
+    '## Laporan bug',
+    `Judul: ${c.title}`,
+    field('Deskripsi', c.description),
+    field('Langkah reproduksi', c.steps),
+    field('Yang diharapkan', c.expected),
+    field('Yang terjadi', c.actual),
+    field('Environment', c.environment),
+    '',
+    a
+      ? [
+          '## Analisis saat ini',
+          `Ringkasan: ${a.summary}`,
+          `Akar masalah (${a.confidence}): ${a.rootCause}`,
+          a.evidence.length ? `Bukti:\n${a.evidence.map((e) => `- ${e.file}${e.line ? `:${e.line}` : ''} — ${e.note}`).join('\n')}` : '',
+          c.tasks.length ? `Task perbaikan:\n${c.tasks.map((t) => `- [${t.repo}] ${t.title} (${t.status}): ${t.fixPlan.slice(0, 600)}`).join('\n')}` : '',
+          a.openQuestions.length ? `Pertanyaan terbuka:\n${a.openQuestions.map((q) => `- ${q}`).join('\n')}` : '',
+        ]
+          .filter(Boolean)
+          .join('\n')
+      : '## Analisis\n(belum ada; bug belum ditrace)',
+    '',
+    opts.logExcerpts.length ? `## Cuplikan log (lengkapnya di logs/)\n${opts.logExcerpts.map((l) => `### ${l.name}\n${l.excerpt}`).join('\n\n')}` : '',
+    '',
+    c.chat?.length ? `## Diskusi sebelumnya\n${chatTranscript(c.chat)}` : '',
+    '',
+    `## Pertanyaan Tech Lead\n${opts.question}`,
   ]
     .filter((l) => l !== '')
     .join('\n');

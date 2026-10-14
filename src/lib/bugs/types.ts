@@ -95,15 +95,37 @@ export interface BugCase {
   jira?: { key: string; url: string; createdAt: string };
   /** All coding-agent runs of the case (draftId `bug-<id>` in the coder). */
   coderRunIds: string[];
+  /** Discussion with the tracing agent about this case (newest last). */
+  chat?: BugChatMessage[];
   createdAt: string;
   updatedAt: string;
 }
 
 export type BugCaseInput = Pick<BugCase, 'title' | 'description' | 'steps' | 'expected' | 'actual' | 'environment' | 'serviceHint'>;
 
+export interface BugChatMessage {
+  id: string;
+  role: 'user' | 'assistant';
+  text: string;
+  at: string;
+  /** provider/model that answered (assistant messages). */
+  model?: string;
+}
+
+export interface BugChatRequest {
+  caseId: string;
+  text: string;
+  ai: AiSelection;
+  /** Let the agent read the Services codebase (read-only) to answer. */
+  useCodebase: boolean;
+  servicesRoot?: string;
+}
+
 export interface BugJob {
   id: string;
   caseId: string;
+  /** trace = the analysis; chat = an answer in the case's discussion. */
+  kind?: 'trace' | 'chat';
   /** Case title when the job started, for the Agent Tasks list. */
   caseTitle?: string;
   status: 'running' | 'done' | 'error' | 'cancelled';
@@ -121,6 +143,8 @@ export interface BugAnalyzeRequest {
   useCodebase: boolean;
   servicesRoot?: string;
   instructions?: string;
+  /** Pass the case's discussion to the trace (its conclusions shape the new analysis). */
+  withChat?: boolean;
 }
 
 export interface BugTicketRequest {

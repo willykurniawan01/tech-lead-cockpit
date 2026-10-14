@@ -26,7 +26,11 @@
         if (!first && before === 'running' && j.status !== 'running') {
           const title = j.caseTitle ? `"${j.caseTitle}"` : 'bug';
           const href = `#/bugs/${j.caseId}`;
-          if (j.status === 'done') toasts.show(`Agent tracing selesai untuk ${title}. Analisa dan usulan task siap direview.`, 'ok', 15_000, { label: 'Lihat analisa', href });
+          if (j.kind === 'chat') {
+            // A discussion answer: a short note, the bug page shows the reply itself.
+            if (j.status === 'done') toasts.show(`Agent menjawab diskusi ${title}.`, 'ok', 8_000, { label: 'Buka diskusi', href });
+            else if (j.status === 'error') toasts.show(`Agent gagal menjawab diskusi ${title}: ${j.error ?? 'tanpa keterangan'}`, 'err', 10_000, { label: 'Buka bug', href });
+          } else if (j.status === 'done') toasts.show(`Agent tracing selesai untuk ${title}. Analisa dan usulan task siap direview.`, 'ok', 15_000, { label: 'Lihat analisa', href });
           else if (j.status === 'error') toasts.show(`Agent tracing gagal untuk ${title}: ${j.error ?? 'tanpa keterangan'}`, 'err', 15_000, { label: 'Buka bug', href });
         }
         seen.set(j.id, j.status);

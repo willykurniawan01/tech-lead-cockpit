@@ -71,6 +71,15 @@ sequenceDiagram
 
 ---
 
+## 💬 Diskusi dengan Agent (per kasus bug)
+
+Panel **Diskusi dengan agent** di halaman kasus (antara Agent tracing dan Task) untuk tanya lanjutan tentang bug.
+
+- **Konteks AI** ([`connector/bugs/analysis.ts`](../../../connector/bugs/analysis.ts) `buildChatPrompt`): laporan, cuplikan log + file log lengkap yang **sudah disensor** (folder kerja sementara yang sama dengan tracing, `workspace`), analisis saat ini (ringkasan, akar masalah, bukti, task, pertanyaan terbuka), dan riwayat diskusi (`chatTranscript`, terbaru dipertahankan). Bila **boleh baca codebase** dicentang, folder Services dibaca **read-only** seperti tracing. AI menjawab teks biasa (markdown), tidak mengubah kode, membedakan fakta dan dugaan, dan menyarankan trace ulang bila analisis perlu berubah.
+- **Background job** ([`connector/bugs/manager.ts`](../../../connector/bugs/manager.ts) `chat`): pertanyaan disimpan di `BugCase.chat` (maks. 200 pesan), jawaban ditambahkan saat job selesai. Job bertanda `kind: 'chat'` sehingga tidak tertukar dengan tracing (`latestJob(caseId, kind)`, `GET /bugs/analyze?caseId=&kind=chat`); satu jawaban per kasus pada satu waktu dan tidak selagi tracing berjalan (begitu pula sebaliknya). Bisa dibatalkan (`POST /bugs/analyze/cancel`), muncul di Agent Tasks sebagai "Diskusi bug", dan `BugTraceWatcher` memberi notifikasi singkat saat dijawab.
+- **Trace ulang memakai diskusi** (`POST /bugs/analyze` dengan `withChat: true`): transkrip diskusi ditambahkan ke instruksi tracing sehingga kesimpulannya membentuk analisis dan usulan task baru (task yang sudah ticketed/fixing tetap).
+- **Hapus diskusi** (`POST /bugs/chat/clear`); route kirim: `POST /bugs/chat` (`BugChatRequest`).
+
 ## 🛡️ Sanitasi & Proteksi Log (Redaction Rules)
 
 Sebelum error log atau stack trace diserahkan ke AI engine, [`connector/bugs/redact.ts`](file:///Users/ridwan/mine/tech-lead-cockpit/connector/bugs/redact.ts) secara otomatis menerapkan pola sensor:

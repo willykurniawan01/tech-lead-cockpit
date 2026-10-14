@@ -1,6 +1,6 @@
 import { api, connectorDownMessage } from '../api-base';
 import type { CoderRun } from '../coder/types';
-import type { BugAnalyzeRequest, BugCase, BugCaseInput, BugJob, BugTaskProposal, BugTaskStatus, BugTicketRequest } from './types';
+import type { BugAnalyzeRequest, BugCase, BugCaseInput, BugChatRequest, BugJob, BugTaskProposal, BugTaskStatus, BugTicketRequest } from './types';
 
 const HEADERS = { 'Content-Type': 'application/json', 'X-TLC-Client': '1' };
 
@@ -32,6 +32,11 @@ export const bugs = {
   job: (id: string) => call<{ job: BugJob | null }>(`/bugs/analyze${q({ id })}`).then((r) => r.job),
   latestJob: (caseId: string) => call<{ job: BugJob | null }>(`/bugs/analyze${q({ caseId })}`).then((r) => r.job),
   cancel: (id: string) => post<{ job: BugJob | null }>('/bugs/analyze/cancel', { id }).then((r) => r.job),
+  /** Ask the tracing agent in the case's discussion (answered in the background). */
+  chat: (req: BugChatRequest) => post<BugJob>('/bugs/chat', req),
+  /** The latest discussion answer job of a case. */
+  latestChatJob: (caseId: string) => call<{ job: BugJob | null }>(`/bugs/analyze${q({ caseId, kind: 'chat' })}`).then((r) => r.job),
+  clearChat: (caseId: string) => post<BugCase>('/bugs/chat/clear', { caseId }),
   issueTypes: (project: string) => call<{ id: string; name: string }[]>(`/bugs/jira-types${q({ project })}`),
   ticket: (req: BugTicketRequest) => post<BugCase>('/bugs/ticket', req),
   /** Recent tracing jobs across all cases (Agent Tasks). */

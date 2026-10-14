@@ -89,7 +89,7 @@
   const TRACE_CHIP: Record<BugJob['status'], string> = { running: 'chip-accent', done: 'chip-ok', error: 'chip-err', cancelled: '' };
 
   async function cancelTrace(j: BugJob) {
-    if (!(await confirmDialog({ title: 'Batalkan tracing?', message: `Hentikan agent tracing untuk "${j.caseTitle ?? 'bug'}"?`, confirmText: 'Batalkan tracing', danger: true }))) return;
+    if (!(await confirmDialog({ title: j.kind === 'chat' ? 'Batalkan jawaban?' : 'Batalkan tracing?', message: j.kind === 'chat' ? `Hentikan agent yang sedang menjawab diskusi "${j.caseTitle ?? 'bug'}"?` : `Hentikan agent tracing untuk "${j.caseTitle ?? 'bug'}"?`, confirmText: 'Batalkan', danger: true }))) return;
     try {
       await bugs.cancel(j.id);
       traces = await bugs.jobs();
@@ -247,7 +247,7 @@
           <div class="task-head">
             <div class="task-title">
               <strong>{j.caseTitle ?? 'Bug'}</strong>
-              <span class="tags"><span class="chip">Tracing bug</span></span>
+              <span class="tags"><span class="chip">{j.kind === 'chat' ? 'Diskusi bug' : 'Tracing bug'}</span></span>
               <span class="muted small">Mulai {fmt(j.startedAt)}{j.finishedAt ? ` · selesai ${fmt(j.finishedAt)}` : ''}</span>
             </div>
             <span class="chip {TRACE_CHIP[j.status]}">{TRACE_LABEL[j.status]}</span>
@@ -255,7 +255,7 @@
           {#if j.status === 'running' && j.progress}<div class="progress"><p class="small">{j.progress}</p></div>{/if}
           {#if j.error}<p class="err small">{j.error}</p>{/if}
           <div class="actions">
-            <a class="btn btn-sm btn-primary" href="#/bugs/{j.caseId}"><Icon name="eye" size={14} /> {j.status === 'done' ? 'Lihat analisa & buat task' : 'Buka bug'}</a>
+            <a class="btn btn-sm btn-primary" href="#/bugs/{j.caseId}"><Icon name="eye" size={14} /> {j.kind === 'chat' ? 'Buka diskusi' : j.status === 'done' ? 'Lihat analisa & buat task' : 'Buka bug'}</a>
             {#if j.status === 'running'}
               <button class="btn btn-sm btn-danger" onclick={() => cancelTrace(j)}><Icon name="x" size={14} /> Batalkan</button>
             {/if}

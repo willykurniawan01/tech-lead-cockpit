@@ -51,7 +51,7 @@ import type { StartReviewRequest } from '../src/lib/review/types.ts';
 import { syncQaAgent } from './qa/agent-sync.ts';
 import { TaskPeakStore } from './task-peaks.ts';
 import { bugFixSpec } from './bugs/analysis.ts';
-import { bugDraftId, type BugAnalyzeRequest, type BugCaseInput, type BugTicketRequest } from '../src/lib/bugs/types.ts';
+import { bugDraftId, type BugAnalyzeRequest, type BugCaseInput, type BugChatRequest, type BugTicketRequest } from '../src/lib/bugs/types.ts';
 
 const manualMrs = new ManualMrs();
 import type { QAEnvironment, QAGenerateRequest, QAPlan, QARunRequest, QASuite } from '../src/lib/qa/types.ts';
@@ -1387,7 +1387,8 @@ async function handleBugs(route: string, url: URL, req: IncomingMessage, res: Se
     if (route === 'GET /bugs/analyze') {
       const id = url.searchParams.get('id');
       const caseId = url.searchParams.get('caseId');
-      return send(res, 200, { job: (id ? bugs.job(id) : caseId ? bugs.latestJob(caseId) : undefined) ?? null });
+      const kind = url.searchParams.get('kind') === 'chat' ? 'chat' : 'trace';
+      return send(res, 200, { job: (id ? bugs.job(id) : caseId ? bugs.latestJob(caseId, kind) : undefined) ?? null });
     }
     if (route === 'GET /bugs/jira-types') {
       const project = (url.searchParams.get('project') ?? '').trim();
@@ -1408,8 +1409,14 @@ async function handleBugs(route: string, url: URL, req: IncomingMessage, res: Se
     if (route === 'POST /bugs/analyze') {
       const r = body as BugAnalyzeRequest;
       if (!isAiSelection(r.ai)) throw new BugInputError('Pilihan AI tidak valid.');
-      return send(res, 202, await bugs.analyze({ caseId: String(r.caseId ?? ''), ai: r.ai, useCodebase: r.useCodebase !== false, servicesRoot: r.servicesRoot, instructions: r.instructions }));
+      return send(res, 202, await bugs.analyze({ caseId: String(r.caseId ?? ''), ai: r.ai, useCodebase: r.useCodebase !== false, servicesRoot: r.servicesRoot, instructions: r.instructions, withChat: r.withChat === true }));
     }
+    if (route === 'POST /bugs/chat') {
+      const r = body as BugChatRequest;
+      if (!isAiSelection(r.ai)) throw new BugInputError('Pilihan AI tidak valid.');
+      return send(res, 202, await bugs.chat({ caseId: String(r.caseId ?? ''), text: String(r.text ?? ''), ai: r.ai, useCodebase: r.useCodebase !== false, servicesRoot: r.servicesRoot }));
+    }
+    if (route === 'POST /bugs/chat/clear') return send(res, 200, await bugs.clearChat(String(body.caseId ?? '')));
     if (route === 'POST /bugs/analyze/cancel') return send(res, 200, { job: (await bugs.cancel(String(body.id ?? ''))) ?? null });
     if (route === 'POST /bugs/tasks/add') return send(res, 200, await bugs.addTask(String(body.caseId ?? ''), body.task ?? {}));
     if (route === 'POST /bugs/tasks/update') return send(res, 200, await bugs.updateTask(String(body.caseId ?? ''), String(body.taskId ?? ''), body.task ?? {}));
