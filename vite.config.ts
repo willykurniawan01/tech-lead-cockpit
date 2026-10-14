@@ -11,7 +11,8 @@ export default defineConfig(({ mode }) => {
   }
   return {
     plugins: [svelte(), devConnector(env)],
-    server: { host: '127.0.0.1', port: 5173, strictPort: true },
+    // PORT lets a second dev server run beside another one (the connector checks the host, not the port).
+    server: { host: '127.0.0.1', port: Number(process.env.PORT) || 5173, strictPort: true },
     test: { environment: 'jsdom', include: ['src/**/*.test.ts', 'connector/**/*.test.ts'] },
   };
 });
