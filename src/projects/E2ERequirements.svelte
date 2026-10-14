@@ -5,6 +5,8 @@
   import { e2eRequirements } from '../lib/qa/requirements';
   import type { QAEnvironment, QAFlow } from '../lib/qa/types';
 
+  const AUTO_OPEN_MAX = 12;
+
   /**
    * The keys an environment still needs before the flows can run, filled in place: variables
    * nobody provides (or only the AI's example value), service base URLs, the auth token.
@@ -18,7 +20,12 @@
   const defaultServices = $derived(req.services.filter((s) => s.status === 'default' && s.service));
 
   let open = $state<boolean | null>(null);
-  const expanded = $derived(open ?? req.todo > 0);
+  // Opens on its own only when the list is short; a long one waits for a click.
+  const expanded = $derived(open ?? (req.todo > 0 && req.todo <= AUTO_OPEN_MAX));
+  let query = $state('');
+  const match = (name: string) => !query.trim() || name.toLowerCase().includes(query.trim().toLowerCase());
+  const shownVars = $derived(todoVars.filter((v) => match(v.name)));
+  const missingCount = $derived(todoVars.filter((v) => v.status === 'missing').length);
   let values = $state<Record<string, string>>({});
   /** Per variable: kept in the Keychain. Defaults to on for names that look like credentials. */
   let secretFlags = $state<Record<string, boolean>>({});
@@ -93,9 +100,14 @@
         {/if}
 
         {#if todoVars.length}
-          <h4>Variabel <span class="muted small">(<code>{'{{nama}}'}</code> yang belum punya nilai asli)</span></h4>
-          <div class="grid">
-            {#each todoVars as v (v.name)}
+          <div class="vars-head">
+            <h4>Variabel <span class="muted small">({missingCount} belum ada nilai · {todoVars.length - missingCount} masih contoh AI)</span></h4>
+            {#if todoVars.length > 8}
+              <input class="input search" type="search" bind:value={query} placeholder="Cari key…" aria-label="Cari key" />
+            {/if}
+          </div>
+          <div class="grid scroll">
+            {#each shownVars as v (v.name)}
               <code class="name" title={v.sensitive ? 'Nama ini tampak seperti kredensial' : ''}>{v.name}</code>
               <span class="badge {STATUS[v.status].cls}">{STATUS[v.status].label}</span>
               <input
@@ -112,6 +124,7 @@
                 {#if v.example && !isSecret(v.name, v.sensitive)}· <button class="link-btn" onclick={() => (values = { ...values, [v.name]: v.example ?? '' })}>pakai contoh</button>{/if}
               </span>
             {/each}
+            {#if !shownVars.length}<p class="muted small">Tidak ada key yang cocok.</p>{/if}
           </div>
         {/if}
 
@@ -192,6 +205,27 @@
     grid-template-columns: minmax(120px, max-content) max-content minmax(160px, 1fr) max-content max-content;
     gap: 6px 10px;
     align-items: center;
+  }
+  .vars-head {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+  }
+  .search {
+    width: 220px;
+    padding: 4px 10px;
+    font-size: 12px;
+  }
+  /* A long list scrolls inside the card, so the page around it keeps its place. */
+  .scroll {
+    max-height: 360px;
+    overflow-y: auto;
+    padding-right: 4px;
+  }
+  .done ul {
+    max-height: 220px;
+    overflow-y: auto;
   }
   .name {
     font-size: 12px;

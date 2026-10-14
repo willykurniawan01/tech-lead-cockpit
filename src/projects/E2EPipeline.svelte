@@ -19,7 +19,9 @@
 
   const POLL_MS = 2000;
   let concurrency = $state(3);
-  let showPlan = $state(true);
+  // Open while there are no test cases yet (time to review); once there are, it starts closed.
+  let planOpen = $state<boolean | null>(null);
+  const showPlan = $derived(planOpen ?? !existingFlows);
   let saving = $state(false);
   let dirty = $state(false);
 
@@ -62,7 +64,7 @@
     const failed = p.agents.filter((a) => a.status === 'error').length;
     if (wasPlanning || p.agents[0]?.role === 'plan') {
       if (p.agents[0]?.status === 'done') {
-        showPlan = true;
+        planOpen = true;
         toasts.show('Rencana journey siap. Review tahapnya, lalu jalankan agent penulis.', 'ok', 5000);
       } else if (p.agents[0]?.status === 'error') toasts.show(`Perencana gagal: ${p.agents[0].error}`, 'err', 8000);
       return;
@@ -120,7 +122,7 @@
     }
     try {
       pipeline = await qa.writeFromPlan(projectId, concurrency, stageIds);
-      showPlan = false;
+      planOpen = false;
     } catch (e) {
       toasts.show((e as Error).message, 'err');
     }
@@ -179,7 +181,7 @@
 {:else if plan}
   <section class="card plan">
     <div class="sec-head">
-      <button class="plan-toggle" onclick={() => (showPlan = !showPlan)} aria-expanded={showPlan}>
+      <button class="plan-toggle" onclick={() => (planOpen = !showPlan)} aria-expanded={showPlan}>
         <Icon name="chevron" size={13} />
         <h3>Rencana journey · {plan.stages.length} tahap</h3>
       </button>

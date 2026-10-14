@@ -560,9 +560,6 @@
 
   <E2EPipeline projectId={project.id} bind:plan bind:pipeline existingFlows={suite?.flows.length ?? 0} onsuite={reloadSuite} />
 
-  <!-- The keys the selected environment still needs for the flows that will run. -->
-  <E2ERequirements flows={enabledFlows} {env} bind:environments onopenenv={() => (envModalOpen = true)} />
-
   <div class="tabs">
     <button class:active={tab === 'flows'} onclick={() => (tab = 'flows')}>Skenario ({suite?.flows.length ?? 0})</button>
     <button class:active={tab === 'results'} onclick={() => (tab = 'results')}>Hasil Run {#if runs.length}({runs.length}){/if}</button>
@@ -570,6 +567,8 @@
 
   <div class="body">
     {#if tab === 'flows'}
+      <!-- The keys the selected environment still needs for the flows that will run (inside the scroll area: it can be long). -->
+      <E2ERequirements flows={enabledFlows} {env} bind:environments onopenenv={() => (envModalOpen = true)} />
       {#if suite?.notes}
         <details class="notes card">
           <summary><Icon name="alert" size={13} /> Asumsi & pertanyaan dari AI</summary>
