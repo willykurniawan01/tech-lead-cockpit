@@ -13,13 +13,17 @@ describe('generation against the codebase', () => {
   let services = '';
   const calls: { prompt: string; readOnlyDirs?: string[] }[] = [];
   let touched: string[] = [];
+  let missingRoot = false;
   const manager = () =>
     new QaManager({
       dir,
       readSecret: async () => null,
       writeSecret: async () => true,
       deleteSecret: async () => true,
-      resolveServicesRoot: async () => services,
+      resolveServicesRoot: async () => {
+        if (missingRoot) throw new Error('Folder codebase tidak ditemukan: /x');
+        return services;
+      },
       watchRepos: async () => async () => touched,
       runAi: (_ai, prompt, opts) => (calls.push({ prompt, readOnlyDirs: opts.readOnlyDirs }), { done: Promise.resolve({ reply: REPLY }), cancel: () => {} }),
     });
@@ -31,6 +35,7 @@ describe('generation against the codebase', () => {
     await mkdir(join(services, 'core-tcico'), { recursive: true });
     calls.length = 0;
     touched = [];
+    missingRoot = false;
   });
   afterEach(() => rm(dir, { recursive: true, force: true }));
 
@@ -55,6 +60,13 @@ describe('generation against the codebase', () => {
       expect(c.readOnlyDirs).toEqual([]);
       expect(c.prompt).not.toContain('## Codebase');
     }
+  });
+
+  it('says in the notes when the codebase could not be read (no silent TAD-only run)', async () => {
+    missingRoot = true;
+    const job = await generate(manager(), { provider: 'claude', model: '' });
+    expect(calls[0].readOnlyDirs).toEqual([]);
+    expect(job.suite?.notes).toMatch(/^PERINGATAN: Codebase tidak terbaca \(Folder codebase tidak ditemukan: \/x\)/);
   });
 
   it('warns in the notes when a repo changed during generation', async () => {

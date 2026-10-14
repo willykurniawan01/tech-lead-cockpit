@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { QAAgentJob, QAFlow, QAGenerateRequest, QARun } from '../../src/lib/qa/types.ts';
 import { QaManager } from './manager.ts';
-import { evidenceMentions } from './plan.ts';
+import { buildPlanPrompt, evidenceMentions, parsePlan, uncoveredTasks } from './plan.ts';
 
 const AI = { provider: 'claude' as const, model: '' };
 
@@ -221,5 +221,33 @@ describe('evidenceMentions', () => {
     expect(evidenceMentions('/v1/promo/{{uuid}}', '  5 ▶ promo := r.Group("/v1/promo")')).toBe(true);
     expect(evidenceMentions('/v1/cms/ghost', 'g.POST("/promo", h.Create)')).toBe(false);
     expect(evidenceMentions('/v1/x', undefined)).toBe(false);
+  });
+});
+
+describe('plan coverage', () => {
+  const request: QAGenerateRequest = {
+    projectId: 'p',
+    projectName: 'Promo',
+    ai: { provider: 'claude', model: '' },
+    categories: [],
+    tasks: [
+      { title: 'Develop API Create Promo', service: 'core-promo', spec: 'POST /cms/promo' },
+      { title: 'Develop API Promo Reserve', service: 'core-promo', spec: 'POST /internal/promo/reserve' },
+      { title: 'Develop Model Promo', service: 'core-promo', spec: 'CREATE TABLE promos' },
+    ],
+  };
+
+  it('asks for the setup through its API and every API task in a stage', () => {
+    const prompt = buildPlanPrompt({ ...request, codebase: { root: '/s', folders: ['core-promo'] } });
+    expect(prompt).toMatch(/Tahap setup membuat data master LEWAT API/);
+    expect(prompt).toContain('router codebase (group cms/admin/backoffice');
+    expect(prompt).toMatch(/WAJIB masuk minimal satu tahap/);
+  });
+
+  it('warns about API tasks no stage tests (model tasks are context only)', () => {
+    expect(uncoveredTasks(request.tasks, [{ taskTitles: ['develop api promo reserve'] }])).toEqual(['Develop API Create Promo']);
+    const reply = JSON.stringify({ notes: 'catatan AI', stages: [{ title: '1. Transaksi', taskTitles: ['Develop API Promo Reserve'], endpoints: [] }] });
+    const plan = parsePlan(reply, { projectId: 'p', projectName: 'Promo', ai: request.ai, request });
+    expect(plan.notes).toBe('PERINGATAN: task belum masuk tahap mana pun (tambahkan ke tahap, atau buat ulang rencana):\n- Develop API Create Promo\n\ncatatan AI');
   });
 });

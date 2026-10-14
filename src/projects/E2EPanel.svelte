@@ -43,7 +43,8 @@
   let append = $state(false);
   /** Check routes, payloads and responses against the Services code (read-only). */
   let useCodebase = $state(true);
-  const servicesRoot = loadServicesRoot();
+  // Derived: settings load after the panel mounts, and the folder in Settings wins over the old default.
+  const servicesRoot = $derived(loadServicesRoot());
   const canReadCode = $derived(ai.provider === 'claude' || ai.provider === 'antigravity');
   let job = $state<QAGenerateJob | null>(null);
   // Multi-agent pipeline: journey plan, writer agents per stage, repair agents after a run.

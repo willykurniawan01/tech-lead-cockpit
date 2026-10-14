@@ -409,7 +409,7 @@ export class QaManager {
    * What the AI may use besides the TAD: the schemas of the tasks' services' databases (read-only,
    * never passwords) and the Services codebase (read-only, CLI agents only).
    */
-  private async prepareContext(req: QAGenerateRequest, progress: (text: string) => void): Promise<{ req: QAGenerateRequest; codebase?: { root: string; folders: string[] } }> {
+  private async prepareContext(req: QAGenerateRequest, progress: (text: string) => void): Promise<{ req: QAGenerateRequest; codebase?: { root: string; folders: string[] }; warning?: string }> {
     // The environment's databases: their schema lets the AI write real-data queries (never passwords).
     req = { ...req, databases: undefined };
     const env = req.environmentId ? (await this.read<QAEnvironment[]>(this.envFile()))?.find((e) => e.id === req.environmentId) : undefined;
@@ -434,6 +434,7 @@ export class QaManager {
     }
     // The codebase (read-only): routes, payloads and responses are checked against the code.
     let codebase: { root: string; folders: string[] } | undefined;
+    let warning: string | undefined;
     // Only the CLI agents can read files; API providers generate from the TAD alone.
     const canRead = req.ai.provider === 'claude' || req.ai.provider === 'antigravity';
     if (req.useCodebase !== false && canRead && this.deps.resolveServicesRoot) {
@@ -444,11 +445,14 @@ export class QaManager {
         const folders = [...new Set(req.tasks.map((t) => names.find((n) => n.toLowerCase() === (t.service ?? '').toLowerCase())).filter((n): n is string => Boolean(n)))];
         codebase = { root, folders };
         req.codebase = codebase;
-      } catch {
-        // No codebase folder: generate from the TAD alone.
+        if (!folders.length) warning = `Folder service task tidak ada di ${root}; AI mencari sendiri di folder itu.`;
+      } catch (e) {
+        // No codebase folder: generate from the TAD alone, and say so (endpoints that only the
+        // code has, like a CMS create API, are then missing).
+        warning = `Codebase tidak terbaca (${(e as Error).message}); test case disusun dari TAD saja. Cek folder Services di Pengaturan.`;
       }
     }
-    return { req, codebase };
+    return { req, codebase, warning };
   }
 
   async generate(req: QAGenerateRequest): Promise<QAGenerateJob> {
@@ -488,7 +492,7 @@ export class QaManager {
           throw e;
         }
         const { flows } = parsed;
-        let notes = parsed.notes;
+        let notes = ctx.warning ? `PERINGATAN: ${ctx.warning}${parsed.notes ? `\n\n${parsed.notes}` : ''}` : parsed.notes;
         // The codebase is read-only: report any change found in a repo's working tree.
         const touched = changed ? await changed().catch(() => []) : [];
         if (touched.length) notes = `${notes ? `${notes}\n\n` : ''}PERINGATAN: working tree berubah selama generate di ${touched.join(', ')}. Periksa repo tersebut.`;
@@ -654,7 +658,7 @@ export class QaManager {
     void (async () => {
       try {
         job.progress = 'Menyiapkan konteks…';
-        const { req: full, codebase } = await this.prepareContext({ ...req, focus: undefined }, (t) => (job.progress = t));
+        const { req: full, codebase, warning } = await this.prepareContext({ ...req, focus: undefined }, (t) => (job.progress = t));
         const changed = codebase && this.deps.watchRepos ? await this.deps.watchRepos(codebase.root).catch(() => undefined) : undefined;
         job.progress = 'AI memetakan journey dari TAD dan kode…';
         const reply = await this.runAgent(job, req.projectName, req.ai, buildPlanPrompt(full), PLAN_SYSTEM_PROMPT, codebase ? [codebase.root] : []);
@@ -675,6 +679,7 @@ export class QaManager {
         }
         const touched = changed ? await changed().catch(() => []) : [];
         if (touched.length) plan.notes = `${plan.notes ? `${plan.notes}\n\n` : ''}PERINGATAN: working tree berubah selama perencanaan di ${touched.join(', ')}.`;
+        if (warning) plan.notes = `PERINGATAN: ${warning}${plan.notes ? `\n\n${plan.notes}` : ''}`;
         await this.savePlan(plan);
         await this.finishAgent(job, req.projectName, { result: `${plan.stages.length} tahap` });
       } catch (e) {

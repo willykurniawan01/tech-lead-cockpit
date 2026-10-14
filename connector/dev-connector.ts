@@ -37,7 +37,7 @@ import { repoProjectPaths } from './releases/repos.ts';
 import type { ReleaseAiJob } from '../src/lib/release/types.ts';
 import { PdfPasswordError } from './pdf-unlock.ts';
 import { QA_KEYCHAIN_SERVICE, QaInputError, QaManager } from './qa/manager.ts';
-import { normalizeEditedFlow } from './qa/generator.ts';
+import { MAX_QA_TASKS, normalizeEditedFlow } from './qa/generator.ts';
 import { checkFlowsAgainstPlan } from './qa/plan.ts';
 import { ReportInputError, ReportVps, type ReportSettings } from './report/vps.ts';
 import { ManualMrError, ManualMrs } from './gitlab-manual.ts';
@@ -955,6 +955,19 @@ const QA_MODULE = Symbol('qa-module');
  * One manager per process, kept on globalThis so a Vite reload doesn't orphan running jobs; an
  * idle manager from an older load is rebuilt so edits to the runner/generator take effect.
  */
+/** The tasks of a generate/plan request. Too many is refused, never cut: a cut task is a missing journey stage. */
+function qaTasks(raw: unknown): QAGenerateRequest['tasks'] {
+  const list = Array.isArray(raw) ? (raw as Record<string, unknown>[]) : [];
+  if (list.length > MAX_QA_TASKS) throw new QaInputError(`Terlalu banyak task (${list.length}); maksimal ${MAX_QA_TASKS}. Pilih per TAD atau per bagian journey.`);
+  return list.map((t) => ({
+    title: String(t.title ?? '').slice(0, 300),
+    tadTitle: t.tadTitle ? String(t.tadTitle).slice(0, 300) : undefined,
+    service: t.service ? String(t.service).slice(0, 100) : undefined,
+    jiraKey: t.jiraKey ? String(t.jiraKey).slice(0, 30) : undefined,
+    spec: String(t.spec ?? ''),
+  }));
+}
+
 function qaManager(): QaManager {
   const existing = qaGlobal.__tlcQa;
   // A manager from an older load may predate isBusy(); treat it as idle then.
@@ -965,7 +978,13 @@ function qaManager(): QaManager {
     writeSecret: (key, value) => writeKeychain(QA_KEYCHAIN_SERVICE, value, `env:${key}`),
     deleteSecret: (key) => deleteKeychain(QA_KEYCHAIN_SERVICE, `env:${key}`),
     // With a codebase the AI needs file tools (Services stays read-only and is checked); otherwise plain text.
-    resolveServicesRoot: (input) => resolveServicesRoot(input || undefined),
+    // A folder the page sent that no longer exists (an old default) falls back to the one in Settings.
+    resolveServicesRoot: (input) =>
+      resolveServicesRoot(input || undefined).catch(async (e) => {
+        const saved = (await settingsStore.load().catch(() => undefined))?.settings.workspace.servicesRoot;
+        if (saved && saved !== input) return resolveServicesRoot(saved);
+        throw e;
+      }),
     watchRepos: async (root) => {
       const before = await snapshotRepos(root);
       return async () => diffSnapshots(before, await snapshotRepos(root)).map((c) => c.repo);
@@ -1043,13 +1062,7 @@ async function handleQa(route: string, url: URL, req: IncomingMessage, res: Serv
       } catch (e) {
         throw new QaInputError((e as Error).message);
       }
-      const tasks = (Array.isArray(body.tasks) ? body.tasks : []).slice(0, 50).map((t) => ({
-        title: String(t.title ?? '').slice(0, 300),
-        tadTitle: t.tadTitle ? String(t.tadTitle).slice(0, 300) : undefined,
-        service: t.service ? String(t.service).slice(0, 100) : undefined,
-        jiraKey: t.jiraKey ? String(t.jiraKey).slice(0, 30) : undefined,
-        spec: String(t.spec ?? ''),
-      }));
+      const tasks = qaTasks(body.tasks);
       return send(res, 202, await qa.generate({ ...body, tasks, existing, categories: Array.isArray(body.categories) ? body.categories : [] }));
     }
     if (route === 'GET /qa/generate') {
@@ -1085,13 +1098,7 @@ async function handleQa(route: string, url: URL, req: IncomingMessage, res: Serv
     if (route === 'POST /qa/plan') {
       const body = await readJson<QAGenerateRequest>(req, 4 * 1024 * 1024);
       if (!isAiSelection(body.ai)) throw new QaInputError('Pilihan AI tidak valid.');
-      const tasks = (Array.isArray(body.tasks) ? body.tasks : []).slice(0, 50).map((t) => ({
-        title: String(t.title ?? '').slice(0, 300),
-        tadTitle: t.tadTitle ? String(t.tadTitle).slice(0, 300) : undefined,
-        service: t.service ? String(t.service).slice(0, 100) : undefined,
-        jiraKey: t.jiraKey ? String(t.jiraKey).slice(0, 30) : undefined,
-        spec: String(t.spec ?? ''),
-      }));
+      const tasks = qaTasks(body.tasks);
       return send(res, 202, await qa.startPlan({ ...body, tasks, existing: undefined, categories: Array.isArray(body.categories) ? body.categories : [] }));
     }
     if (route === 'POST /qa/plan/save') {

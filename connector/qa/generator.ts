@@ -21,6 +21,8 @@ import {
  */
 
 export const MAX_SPEC_CHARS = 60_000;
+/** Tasks per generate/plan request; more is refused rather than cut (a cut task is a missing stage). */
+export const MAX_QA_TASKS = 200;
 const MAX_PRD_CHARS = 20_000;
 const MAX_FLOWS = 40;
 const MAX_STEPS = 25;
@@ -160,6 +162,7 @@ export function buildQaPrompt(req: QAGenerateRequest): string {
     'Aturan:',
     `- Kategori yang diminta: ${categories}. Buat minimal satu flow happy path per alur utama, lalu flow negatif yang paling berisiko.`,
     '- URUTAN FLOW = URUTAN JOURNEY BISNIS dari awal sampai akhir, bukan per kategori. Mulai dari pembuatan data master/setup (mis. create promo lewat CMS), lalu approval & aktivasi, lalu pemakaian/transaksi (mis. validate, reserve, confirm), lalu pasca-transaksi (rollback, release, reporting, expired/scheduler). Uji negatif & edge case diletakkan tepat setelah happy path tahap yang diujinya.',
+    `- Data master dibuat LEWAT API-nya, bukan dianggap sudah ada: flow pertama menjalankan alur setup lengkap (mis. create promo di CMS → upload dokumen/ajukan approval → approve → aktivasi) dengan endpoint dari Detail Task${req.codebase ? ' atau dari router di codebase (cari group cms/admin/backoffice di service terkait)' : ''}. Seed/"dataQueries" hanya bila API setup itu memang tidak ada; sebut di "notes".`,
     '- Isi "stage" setiap flow dengan nomor & nama tahap journey, mis. "1. Buat data promo (CMS)", "2. Approval & aktivasi", "3. Transaksi", "4. Pasca transaksi". Flow pada tahap yang sama memakai label yang sama persis.',
     '- Data mengalir antar-flow saat dijalankan berurutan: nilai yang di-"extract" flow sebelumnya (mis. promoUuid dari create promo) otomatis tersedia sebagai {{promoUuid}} di flow berikutnya. Jadi flow tahap awal WAJIB membuat datanya sendiri dan meng-extract id/kode dengan nama variabel yang konsisten, dan flow selanjutnya memakai nama variabel yang sama. "dataQueries" hanya cadangan saat flow dijalankan sendiri (diabaikan bila variabelnya sudah terisi dari flow sebelumnya).',
     '- Gunakan endpoint, method, header, payload, dan response PERSIS sesuai Detail Task. Jangan mengarang endpoint yang tidak ada di TAD; jika data kurang, tulis asumsi di "notes".',

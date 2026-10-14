@@ -231,6 +231,8 @@ describe('generator', () => {
     expect(prompt).not.toContain('happy-path (Happy path)');
     expect(prompt).toContain('- Login lalu buat order [integration-chain]');
     expect(prompt).toContain('Fokus refund');
+    // Master data comes from its API (e.g. create promo in the CMS), not an assumed seed.
+    expect(prompt).toMatch(/Data master dibuat LEWAT API-nya/);
   });
 });
 

@@ -48,6 +48,8 @@ export function buildPlanPrompt(req: QAGenerateRequest): string {
     req.codebase
       ? `- Codebase ada di "${req.codebase.root}" (HANYA BACA)${req.codebase.folders.length ? `; folder service terkait: ${req.codebase.folders.join(', ')}` : ''}. Untuk tiap endpoint BUKA router-nya dan tulis "evidence" berupa path file relatif terhadap folder Services + nomor baris route itu didaftarkan. Path endpoint ditulis LENGKAP termasuk prefix group. Endpoint yang tidak ada di router jangan dicantumkan (sebut di notes). Endpoint yang ada di kode tapi belum ada di Detail Task boleh dicantumkan bila dibutuhkan journey.`
       : '- Codebase tidak tersedia: susun dari Detail Task; kosongkan "evidence".',
+    `- Tahap setup membuat data master LEWAT API (mis. create promo di CMS → ajukan approval → approve → aktivasi), bukan prasyarat seed. Cari API itu di Detail Task${req.codebase ? ' dan di router codebase (group cms/admin/backoffice service terkait)' : ''}; seed hanya bila API-nya memang tidak ada (sebut di notes).`,
+    '- Setiap Detail Task berupa API, integrasi, atau scheduler WAJIB masuk minimal satu tahap ("taskTitles"). Task model/tabel/boilerplate cukup dipakai sebagai konteks.',
     '- "rules": aturan bisnis yang perlu diuji per tahap (validasi request, kondisi status, batas kuota/nominal, kode error bisnis yang dikembalikan handler). Ambil dari kode bila tersedia.',
     '- "variables": kontrak data antar-tahap. Nama camelCase yang konsisten; tahap yang membuat data mencantumkannya di "produces", tahap yang memakainya di "consumes".',
     '- "taskTitles": Detail Task yang diuji tiap tahap, persis seperti judul input.',
@@ -102,7 +104,15 @@ export function parsePlan(reply: string, base: Pick<QAPlan, 'projectId' | 'proje
     })
     .filter((v) => /^[A-Za-z_]\w*$/.test(v.name));
   const now = new Date().toISOString();
-  return { ...base, createdAt: now, updatedAt: now, stages, variables, notes: str(json.notes, 5_000) || undefined };
+  const missing = uncoveredTasks(base.request.tasks, stages);
+  const notes = [missing.length ? `PERINGATAN: task belum masuk tahap mana pun (tambahkan ke tahap, atau buat ulang rencana):\n${missing.map((t) => `- ${t}`).join('\n')}` : '', str(json.notes, 5_000)].filter(Boolean).join('\n\n');
+  return { ...base, createdAt: now, updatedAt: now, stages, variables, notes: notes || undefined };
+}
+
+/** Tasks no stage tests, leaving out model/table/boilerplate tasks (context only, nothing to call). */
+export function uncoveredTasks(tasks: { title: string }[], stages: Pick<QAPlanStage, 'taskTitles'>[]): string[] {
+  const covered = new Set(stages.flatMap((s) => s.taskTitles.map((t) => t.toLowerCase())));
+  return tasks.map((t) => t.title).filter((t) => t && !covered.has(t.toLowerCase()) && !/\b(model|tabel|table|boilerplate|migrasi|migration)\b/i.test(t));
 }
 
 /**
