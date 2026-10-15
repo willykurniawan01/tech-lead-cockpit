@@ -77,6 +77,8 @@ Runner ([`connector/qa/runner.ts`](../../../connector/qa/runner.ts)) menentukan 
 
 Prompt penulis, perbaikan, dan repair meminta AI menulis cast sesuai tipe di struct request.
 
+Assertion `equals`/`contains`/`gt`/… tanpa nilai harapan gagal dengan pesan "nilai yang diharapkan belum diisi", bukan "not equal" polos. Di editor flow, string kosong ditampilkan dan ditulis sebagai `""`; kotak yang dikosongkan berarti tanpa nilai. Dulu `""` hilang saat flow diedit lalu disimpan.
+
 ---
 
 ## 🛠️ Perbaiki dengan AI (instruksi)

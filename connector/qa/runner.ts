@@ -154,6 +154,9 @@ function compare(op: string, actual: unknown, found: boolean, expected: unknown)
 
 const show = (v: unknown) => (v === undefined ? '(tidak ada)' : JSON.stringify(v)?.slice(0, 200));
 
+/** Operators that compare with a value: without one the check can only fail, so it says why. */
+const NEEDS_VALUE = new Set(['equals', 'not_equals', 'contains', 'matches', 'type', 'gt', 'lt']);
+
 export function checkAssertion(a: QAAssertion, res: { status: number; headers: Record<string, string>; json: unknown; durationMs: number }): QAAssertionResult {
   if (a.type === 'status') {
     const want = Array.isArray(a.expected) ? a.expected : [a.expected];
@@ -172,6 +175,7 @@ export function checkAssertion(a: QAAssertion, res: { status: number; headers: R
   }
   if (a.type === 'db') return { assertion: a, passed: false, message: 'Cek data dijalankan setelah request.' };
   const { found, value } = jsonPath(res.json, a.path);
+  if (a.expected === undefined && NEEDS_VALUE.has(a.op)) return { assertion: a, passed: false, actual: value, message: `${a.path} ${a.op}: nilai yang diharapkan belum diisi (aktual ${show(value)}). Isi expected, mis. "" untuk string kosong.` };
   const passed = compare(a.op, value, found, a.expected);
   return { assertion: a, passed, actual: value, message: `${a.path} ${a.op}${a.expected !== undefined ? ` ${show(a.expected)}` : ''}: ${passed ? 'OK' : `aktual ${show(value)}`}` };
 }

@@ -57,7 +57,8 @@
     }
     return out;
   }
-  const show = (v: unknown) => (v === undefined ? '' : typeof v === 'string' ? v : JSON.stringify(v));
+  // An empty string shows as "" (an empty box means no value), so it survives an edit.
+  const show = (v: unknown) => (v === undefined ? '' : v === '' ? '""' : typeof v === 'string' ? v : JSON.stringify(v));
   function parseValue(v: string): unknown {
     const t = v.trim();
     if (t === '') return undefined;
@@ -400,7 +401,7 @@
                       <input class="input mono" bind:value={x.target} placeholder={x.type === 'json' ? '$.data.status' : 'Content-Type'} aria-label="Target" />
                     {/if}
                     <select class="input" bind:value={x.op} aria-label="Operator">{#each QA_VALUE_OPS as o (o)}<option value={o}>{o}</option>{/each}</select>
-                    {#if x.op !== 'exists' && x.op !== 'not_exists'}<input class="input mono" bind:value={x.expected} placeholder="nilai, mis. PENDING" aria-label="Nilai" />{/if}
+                    {#if x.op !== 'exists' && x.op !== 'not_exists'}<input class="input mono" bind:value={x.expected} placeholder={'nilai, mis. PENDING ("" = string kosong)'} aria-label="Nilai" />{/if}
                   {/if}
                   <button class="btn btn-ghost btn-xs" onclick={() => (s.extras = s.extras.filter((_, k) => k !== j))} aria-label="Hapus cek"><Icon name="trash" size={11} /></button>
                   {#if x.type === 'db'}<textarea class="input mono sql" rows="2" bind:value={x.sql} placeholder={"SELECT status FROM reservations WHERE id = '{{reservationId}}'"}></textarea>{/if}

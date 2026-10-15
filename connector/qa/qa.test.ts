@@ -98,6 +98,12 @@ describe('runner helpers', () => {
     expect(checkAssertion({ type: 'json', path: '$.data.gone', op: 'not_exists' }, res).passed).toBe(true);
     expect(checkAssertion({ type: 'header', name: 'content-type', op: 'contains', expected: 'json' }, res).passed).toBe(true);
     expect(checkAssertion({ type: 'latency', op: 'lt', expected: 100 }, res).passed).toBe(false);
+    // An empty string is a value; a missing one says so instead of a bare "not equal".
+    const empty = { ...res, json: { data: { note: '' } } };
+    expect(checkAssertion({ type: 'json', path: '$.data.note', op: 'equals', expected: '' }, empty).passed).toBe(true);
+    const missing = checkAssertion({ type: 'json', path: '$.data.note', op: 'equals' }, empty);
+    expect(missing.passed).toBe(false);
+    expect(missing.message).toContain('nilai yang diharapkan belum diisi');
   });
 });
 
