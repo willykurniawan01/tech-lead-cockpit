@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { DEFAULT_AI_SELECTION, isAiSelection } from '../src/lib/ai/types.ts';
 import type { GeneratorJob, GeneratorJobEvent, StartGeneratorJobRequest } from '../src/lib/generator/types.ts';
-import { startProviderRun, terminateProviderProcess, type ProviderRun } from './ai-providers.ts';
+import { FIGMA_READ_TOOLS, startProviderRun, terminateProviderProcess, type ProviderRun } from './ai-providers.ts';
 import { prepareGeneratorWorkspace, readGeneratorResult } from './generator-runner.ts';
 import { diffSnapshots, resolveServicesRoot, snapshotRepos, type RepoSnapshot } from './services.ts';
 
@@ -88,6 +88,8 @@ class GeneratorJobs {
         timeoutMs: JOB_TIMEOUT_MS,
         onEvent: push,
         readOnlyDirs: servicesRoot ? [servicesRoot] : [],
+        // Figma links in the TAD can be opened through the user's claude.ai Figma connector (read only).
+        allowedMcpTools: FIGMA_READ_TOOLS,
         resumeSession,
       });
       state.run = run;

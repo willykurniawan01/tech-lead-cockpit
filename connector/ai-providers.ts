@@ -344,14 +344,24 @@ export interface ProviderRunOptions {
    * Everything else stays denied, so coding agents can run tests but nothing else.
    */
   allowedCommands?: string[];
+  /** MCP tools (exact names, e.g. FIGMA_READ_TOOLS) an edit run may call without asking. Claude only. */
+  allowedMcpTools?: string[];
   onEvent?: (e: ProviderEvent) => void;
 }
 
-/** `--allowedTools` for an edit run, optionally with a few whitelisted command prefixes. */
-export function claudeEditArgs(allowedCommands: string[] = []): string[] {
-  if (!allowedCommands.length) return CLAUDE_EDIT_ARGS;
+/**
+ * Read-only tools of the Figma connector the user linked in claude.ai. A non-interactive run can't
+ * ask for permission, so without these an agent's Figma calls are refused; tools that change
+ * Figma files stay off.
+ */
+export const FIGMA_READ_TOOLS = ['get_screenshot', 'get_metadata', 'get_design_context', 'get_variable_defs', 'get_figjam'].map((t) => `mcp__claude_ai_Figma__${t}`);
+
+/** `--allowedTools` for an edit run, optionally with a few whitelisted command prefixes and MCP tools. */
+export function claudeEditArgs(allowedCommands: string[] = [], mcpTools: string[] = []): string[] {
+  if (!allowedCommands.length && !mcpTools.length) return CLAUDE_EDIT_ARGS;
   const bash = allowedCommands.map((c) => `Bash(${c.replace(/[(),]/g, '')}:*)`);
-  return ['--allowedTools', ['Read', 'Glob', 'Grep', 'Edit', 'Write', ...bash].join(','), '--permission-mode', 'acceptEdits'];
+  const mcp = mcpTools.filter((t) => /^mcp__[\w-]+__[\w-]+$/.test(t));
+  return ['--allowedTools', ['Read', 'Glob', 'Grep', 'Edit', 'Write', ...bash, ...mcp].join(','), '--permission-mode', 'acceptEdits'];
 }
 
 export { terminate as terminateProviderProcess };
@@ -395,7 +405,7 @@ export function startProviderRun(sel: AiSelection, purpose: RunPurpose, prompt: 
   if (sel.provider === 'claude') {
     bin = findClaudeBinary();
     args = ['-p', '--output-format', 'stream-json', '--verbose', ...modelArgs(sel.model)];
-    args.push(...(purpose === 'edit' ? claudeEditArgs(opts.allowedCommands) : ['--tools', '', ...(opts.systemPrompt ? ['--system-prompt', opts.systemPrompt] : [])]));
+    args.push(...(purpose === 'edit' ? claudeEditArgs(opts.allowedCommands, opts.allowedMcpTools) : ['--tools', '', ...(opts.systemPrompt ? ['--system-prompt', opts.systemPrompt] : [])]));
     if (purpose === 'edit') args.push(...claudeReadOnlyDirArgs(opts.readOnlyDirs ?? [], Boolean(opts.allowedCommands?.length)));
     if (opts.resumeSession) args.push('--resume', opts.resumeSession);
     // Prompt on stdin, then close it: with an open pipe the CLI waits for more input forever.

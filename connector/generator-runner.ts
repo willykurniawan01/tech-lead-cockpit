@@ -78,6 +78,20 @@ export function isValidDraftId(id: unknown): id is string {
   return typeof id === 'string' && /^[A-Za-z0-9-]{1,64}$/.test(id);
 }
 
+/**
+ * Links Cockpit didn't fetch: Claude may open them with the read-only tools of the user's claude.ai
+ * Figma connector when it is connected; otherwise (or for other providers) the link is cited as is.
+ */
+export function figmaToolHint(provider: RunChatOptions['provider'], none = false): string {
+  const fallback = `cantumkan link-nya pada task UI terkait${none ? ' dan gunakan ekspor layar di docs/ bila ada' : ''}.`;
+  const hint =
+    provider !== 'claude'
+      ? `kamu tidak bisa membuka Figma; ${fallback}`
+      : `bila tool Figma (get_metadata, get_screenshot, get_design_context) tersedia, pakai untuk membuka link itu (hanya baca); bila tool tidak tersedia atau terputus, jangan berhenti atau meminta izin: lanjutkan tanpa Figma, ${fallback} Sebut di chat layar mana yang belum terverifikasi.`;
+  // `none`: the hint opens a sentence.
+  return none ? hint[0].toUpperCase() + hint.slice(1) : hint;
+}
+
 /** How the AI should use the Figma screens Cockpit fetched into figma/ (images only for CLI providers). */
 export function figmaContextLine(sets: FigmaFetchedSet[], provider: RunChatOptions['provider']): string {
   const list = sets
@@ -162,8 +176,8 @@ export async function prepareGeneratorWorkspace(opts: RunChatOptions): Promise<P
       : '- PRD.md: requirement produk (sumber utama).',
     figma.length
       ? figmaSets.length
-        ? '- figma-links.md: link desain Figma. Layar dari link yang sudah diambil ada di figma/ (lihat poin berikut); untuk link lain kamu tidak bisa membuka Figma, cukup cantumkan link-nya pada task UI terkait.'
-        : '- figma-links.md: link desain Figma. Kamu tidak bisa membuka Figma; cantumkan link-nya pada task UI terkait dan gunakan ekspor layar di docs/ bila ada.'
+        ? `- figma-links.md: link desain Figma. Layar dari link yang sudah diambil ada di figma/ (lihat poin berikut); untuk link lain ${figmaToolHint(opts.provider)}`
+        : `- figma-links.md: link desain Figma. ${figmaToolHint(opts.provider, true)}`
       : '',
     figmaSets.length ? figmaContextLine(figmaSets, opts.provider) : '',
     readableDocs.length ? `- docs/: dokumen pendukung (${readableDocs.join(', ')}), misalnya dokumentasi API partner atau ekspor layar Figma. Baca seluruhnya.` : '',

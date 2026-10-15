@@ -5,9 +5,9 @@ import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { agyReadAccess, grantAgyReadAccess } from './agy-settings.ts';
-import { claudeReadOnlyDirArgs } from './ai-providers.ts';
+import { claudeEditArgs, claudeReadOnlyDirArgs, FIGMA_READ_TOOLS } from './ai-providers.ts';
 import { diffSnapshots, resolveServicesRoot, snapshotRepos } from './services.ts';
-import { prepareGeneratorWorkspace, readGeneratorResult } from './generator-runner.ts';
+import { figmaToolHint, prepareGeneratorWorkspace, readGeneratorResult } from './generator-runner.ts';
 import { isPdfEncrypted, listDocs, saveDoc, safeDocName, workspaceDir } from './workspace-docs.ts';
 
 describe('resolveServicesRoot', () => {
@@ -126,6 +126,23 @@ describe('Antigravity read access', () => {
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe('claudeEditArgs', () => {
+  it('lets a generator run read Figma through the claude.ai connector, never change it', () => {
+    const [, allowed] = claudeEditArgs([], FIGMA_READ_TOOLS);
+    expect(allowed.split(',')).toEqual(['Read', 'Glob', 'Grep', 'Edit', 'Write', 'mcp__claude_ai_Figma__get_screenshot', 'mcp__claude_ai_Figma__get_metadata', 'mcp__claude_ai_Figma__get_design_context', 'mcp__claude_ai_Figma__get_variable_defs', 'mcp__claude_ai_Figma__get_figjam']);
+    expect(allowed).not.toMatch(/use_figma|create_new_file|upload/);
+    // A malformed name is dropped; without extras the plain file tools stay.
+    expect(claudeEditArgs([], ['mcp__x__y', 'Bash(rm -rf /)'])[1]).toBe('Read,Glob,Grep,Edit,Write,mcp__x__y');
+    expect(claudeEditArgs()).toEqual(['--allowedTools', 'Read,Glob,Grep,Edit,Write', '--permission-mode', 'acceptEdits']);
+  });
+
+  it('tells Claude to use the Figma tools when there and go on without them when not', () => {
+    expect(figmaToolHint('claude')).toContain('bila tool Figma');
+    expect(figmaToolHint('claude')).toContain('jangan berhenti atau meminta izin');
+    expect(figmaToolHint('antigravity', true)).toBe('Kamu tidak bisa membuka Figma; cantumkan link-nya pada task UI terkait dan gunakan ekspor layar di docs/ bila ada.');
   });
 });
 

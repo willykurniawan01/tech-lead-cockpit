@@ -225,6 +225,8 @@ AI generator berjalan headless, sehingga tidak bisa meminta izin tool Figma. Kar
 4. [`prepareGeneratorWorkspace`](../../../connector/generator-runner.ts) membaca manifest dan menambahkan instruksi `figmaContextLine`: provider CLI (Claude, Antigravity) diminta membaca `index.md` lalu membuka PNG yang relevan; InferHub/9Router hanya membaca `index.md` karena tool baca mereka berbasis teks. Kalimat lama "Kamu tidak bisa membuka Figma" hanya dipakai bila belum ada layar yang diambil.
 5. Saat modal dibuka, versi file Figma dicek ulang; set dari file yang berubah diberi tanda **Desain sudah berubah di Figma** dan bisa diambil ulang.
 
+**Konektor Figma claude.ai (tambahan, Claude CLI saja).** Run generator (`generator-jobs.ts`) mengizinkan tool baca dari konektor Figma yang ditautkan user di claude.ai: `FIGMA_READ_TOOLS` di [`connector/ai-providers.ts`](../../../connector/ai-providers.ts) (`get_screenshot`, `get_metadata`, `get_design_context`, `get_variable_defs`, `get_figjam`), lewat `allowedMcpTools` → `claudeEditArgs`. Tanpa izin ini, run headless menolak panggilan tool itu ("you haven't granted it yet") karena tidak bisa menampilkan prompt Allow. Tool yang mengubah file Figma tidak diizinkan. Untuk link yang belum diambil, `figmaToolHint` meminta Claude memakai tool itu bila tersedia. Bila tool tidak tersedia atau terputus, Claude tetap lanjut tanpa Figma, mencantumkan link, dan menyebut layar yang belum terverifikasi. Provider lain tetap mendapat kalimat "tidak bisa membuka Figma". Jalur paling andal tetap **Ambil layar**, karena tidak bergantung pada konektor claude.ai.
+
 ---
 
 ## 🤖 Catatan Versi AI (TAD Changelog) & Diff-Driven Summary
