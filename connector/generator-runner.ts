@@ -6,6 +6,7 @@ import { promisify } from 'node:util';
 import { collapseEmbeddedHtml, expandEmbeddedHtml } from '../src/lib/markdown/embedded-html.ts';
 import type { FigmaFetchedSet } from '../src/lib/figma/types.ts';
 import { isPdfEncrypted } from './workspace-docs.ts';
+import { FIGMA_READ_ONLY_RULE } from './ai-providers.ts';
 import { readFetchedSets } from './figma.ts';
 import { DATA_DIR } from './paths.ts';
 
@@ -87,7 +88,7 @@ export function figmaToolHint(provider: RunChatOptions['provider'], none = false
   const hint =
     provider !== 'claude'
       ? `kamu tidak bisa membuka Figma; ${fallback}`
-      : `bila tool Figma (get_metadata, get_screenshot, get_design_context) tersedia, pakai untuk membuka link itu (hanya baca); bila tool tidak tersedia atau terputus, jangan berhenti atau meminta izin: lanjutkan tanpa Figma, ${fallback} Sebut di chat layar mana yang belum terverifikasi.`;
+      : `bila tool Figma (get_metadata, get_screenshot, get_design_context) tersedia, pakai untuk membuka link itu. Bila link hanya menunjuk judul/label atau layar yang dicari tidak ada di bawahnya, telusuri sendiri dengan use_figma (induk node, frame di sekitarnya, halaman lain) lalu buka layarnya dengan get_screenshot. ${FIGMA_READ_ONLY_RULE} Bila tool tidak tersedia atau terputus, jangan berhenti atau meminta izin: lanjutkan tanpa Figma, ${fallback} Sebut di chat layar mana yang belum terverifikasi.`;
   // `none`: the hint opens a sentence.
   return none ? hint[0].toUpperCase() + hint.slice(1) : hint;
 }
@@ -96,7 +97,7 @@ export function figmaToolHint(provider: RunChatOptions['provider'], none = false
 export function figmaMapLine(files: string[], provider: RunChatOptions['provider']): string {
   const use =
     provider === 'claude'
-      ? 'Bila link menunjuk judul, label, atau bagian kecil, cari section/frame layar yang relevan di peta (bagian "Isi node" dan "Di sekitarnya"), lalu buka dengan tool Figma get_metadata / get_screenshot / get_design_context memakai fileKey dan node-id dari peta. Telusuri sendiri sampai layar yang dibutuhkan ketemu; jangan meminta link lain sebelum peta ini habis dicek.'
+      ? 'Bila link menunjuk judul, label, atau bagian kecil, cari section/frame layar yang relevan di peta (bagian "Isi node" dan "Di sekitarnya"), lalu buka dengan tool Figma get_metadata / get_screenshot / get_design_context memakai fileKey dan node-id dari peta. Telusuri sendiri sampai layar yang dibutuhkan ketemu (bila peta gagal dibuat atau belum cukup, pakai use_figma secara hanya-baca); jangan meminta link lain sebelum peta ini habis dicek.'
       : 'Pakai nama layar dan link di peta sebagai acuan task UI.';
   return `- figma-map/: peta struktur Figma di sekitar tiap link, dibuat Cockpit (${files.map((f) => `figma-map/${f}`).join(', ')}): letak node (halaman → section → …), isinya, dan frame di sekitarnya beserta node-id. ${use}`;
 }

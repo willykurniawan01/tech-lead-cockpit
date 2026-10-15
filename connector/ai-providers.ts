@@ -356,6 +356,16 @@ export interface ProviderRunOptions {
  */
 export const FIGMA_READ_TOOLS = ['get_screenshot', 'get_metadata', 'get_design_context', 'get_variable_defs', 'get_figjam'].map((t) => `mcp__claude_ai_Figma__${t}`);
 
+/**
+ * use_figma runs plugin code: the only connector tool that can walk up to a node's parent and
+ * across pages, but it could also change the file. Allowed for the TAD generator at the user's
+ * choice, with a read-only rule in the prompt (FIGMA_READ_ONLY_RULE); not enforced technically.
+ */
+export const FIGMA_EXPLORE_TOOL = 'mcp__claude_ai_Figma__use_figma';
+
+export const FIGMA_READ_ONLY_RULE =
+  'use_figma HANYA untuk MEMBACA: menelusuri figma.root, halaman, node.parent, children, findAll/findOne, dan membaca properti (nama, tipe, ukuran, teks). DILARANG mengubah apa pun: jangan set properti, jangan create/clone/remove/resize/move node, jangan ubah style/variable/komponen, jangan setPluginData, jangan figma.commitUndo atau notify. Kode yang ragu-ragu mengubah file jangan dijalankan.';
+
 /** `--allowedTools` for an edit run, optionally with a few whitelisted command prefixes and MCP tools. */
 export function claudeEditArgs(allowedCommands: string[] = [], mcpTools: string[] = []): string[] {
   if (!allowedCommands.length && !mcpTools.length) return CLAUDE_EDIT_ARGS;

@@ -5,7 +5,7 @@ import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { agyReadAccess, grantAgyReadAccess } from './agy-settings.ts';
-import { claudeEditArgs, claudeReadOnlyDirArgs, FIGMA_READ_TOOLS } from './ai-providers.ts';
+import { claudeEditArgs, claudeReadOnlyDirArgs, FIGMA_EXPLORE_TOOL, FIGMA_READ_TOOLS } from './ai-providers.ts';
 import { diffSnapshots, resolveServicesRoot, snapshotRepos } from './services.ts';
 import { figmaToolHint, prepareGeneratorWorkspace, readGeneratorResult } from './generator-runner.ts';
 import { isPdfEncrypted, listDocs, saveDoc, safeDocName, workspaceDir } from './workspace-docs.ts';
@@ -137,6 +137,15 @@ describe('claudeEditArgs', () => {
     // A malformed name is dropped; without extras the plain file tools stay.
     expect(claudeEditArgs([], ['mcp__x__y', 'Bash(rm -rf /)'])[1]).toBe('Read,Glob,Grep,Edit,Write,mcp__x__y');
     expect(claudeEditArgs()).toEqual(['--allowedTools', 'Read,Glob,Grep,Edit,Write', '--permission-mode', 'acceptEdits']);
+  });
+
+  it('lets the generator walk Figma with use_figma under a read-only rule', () => {
+    expect(FIGMA_EXPLORE_TOOL).toBe('mcp__claude_ai_Figma__use_figma');
+    expect(claudeEditArgs([], [...FIGMA_READ_TOOLS, FIGMA_EXPLORE_TOOL])[1]).toContain(',mcp__claude_ai_Figma__use_figma');
+    expect(figmaToolHint('claude')).toContain('telusuri sendiri dengan use_figma');
+    expect(figmaToolHint('claude')).toContain('use_figma HANYA untuk MEMBACA');
+    expect(figmaToolHint('claude')).toContain('DILARANG mengubah apa pun');
+    expect(figmaToolHint('9router')).not.toContain('use_figma');
   });
 
   it('tells Claude to use the Figma tools when there and go on without them when not', () => {
