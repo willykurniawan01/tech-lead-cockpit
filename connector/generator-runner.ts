@@ -92,6 +92,15 @@ export function figmaToolHint(provider: RunChatOptions['provider'], none = false
   return none ? hint[0].toUpperCase() + hint.slice(1) : hint;
 }
 
+/** figma-map/: the structure around each link, so a link to a title bar still leads to the screens. */
+export function figmaMapLine(files: string[], provider: RunChatOptions['provider']): string {
+  const use =
+    provider === 'claude'
+      ? 'Bila link menunjuk judul, label, atau bagian kecil, cari section/frame layar yang relevan di peta (bagian "Isi node" dan "Di sekitarnya"), lalu buka dengan tool Figma get_metadata / get_screenshot / get_design_context memakai fileKey dan node-id dari peta. Telusuri sendiri sampai layar yang dibutuhkan ketemu; jangan meminta link lain sebelum peta ini habis dicek.'
+      : 'Pakai nama layar dan link di peta sebagai acuan task UI.';
+  return `- figma-map/: peta struktur Figma di sekitar tiap link, dibuat Cockpit (${files.map((f) => `figma-map/${f}`).join(', ')}): letak node (halaman → section → …), isinya, dan frame di sekitarnya beserta node-id. ${use}`;
+}
+
 /** How the AI should use the Figma screens Cockpit fetched into figma/ (images only for CLI providers). */
 export function figmaContextLine(sets: FigmaFetchedSet[], provider: RunChatOptions['provider']): string {
   const list = sets
@@ -141,6 +150,7 @@ export async function prepareGeneratorWorkspace(opts: RunChatOptions): Promise<P
     await fs.promises.writeFile(path.join(workspaceDir, 'figma-links.md'), body, 'utf-8');
   }
   const figmaSets = await readFetchedSets(path.join(workspaceDir, 'figma'));
+  const figmaMaps = figma.length ? (await fs.promises.readdir(path.join(workspaceDir, 'figma-map')).catch(() => [] as string[])).filter((n) => n.endsWith('.md')) : [];
   let docs: string[] = [];
   try {
     docs = await fs.promises.readdir(path.join(workspaceDir, 'docs'));
@@ -180,6 +190,7 @@ export async function prepareGeneratorWorkspace(opts: RunChatOptions): Promise<P
         : `- figma-links.md: link desain Figma. ${figmaToolHint(opts.provider, true)}`
       : '',
     figmaSets.length ? figmaContextLine(figmaSets, opts.provider) : '',
+    figmaMaps.length ? figmaMapLine(figmaMaps, opts.provider) : '',
     readableDocs.length ? `- docs/: dokumen pendukung (${readableDocs.join(', ')}), misalnya dokumentasi API partner atau ekspor layar Figma. Baca seluruhnya.` : '',
     encryptedDocs.length
       ? `- PERINGATAN DOKUMEN: File (${encryptedDocs.join(', ')}) di folder docs/ terenkripsi/berproteksi sandi dan tidak dapat dibaca oleh AI. JANGAN membuka atau memanggil tool view_file pada file tersebut karena akan memicu error 400 (INVALID_ARGUMENT). Sampaikan ke user di chat bahwa file tersebut perlu dibuka dengan password lewat menu Dokumen Partner di Cockpit.`

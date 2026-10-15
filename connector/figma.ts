@@ -1,4 +1,4 @@
-import { mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { FigmaFetchedSet, FigmaScreen, FigmaScreenList, FigmaUser } from '../src/lib/figma/types.ts';
 
@@ -19,6 +19,8 @@ const NODE_BATCH = 5;
 const MAX_TEXT_LINES = 400;
 const MAX_TEXT_CHARS = 300;
 const MAX_RETRY_WAIT_MS = 30_000;
+/** A link map is reused this long (Figma's API quota per seat can be tiny). */
+const MAP_TTL_MS = 24 * 60 * 60 * 1000;
 
 export class FigmaError extends Error {
   constructor(
@@ -120,6 +122,11 @@ export class FigmaClient {
     return this.get<FileResponse>(`/v1/files/${fileKey}?depth=${depth}`);
   }
 
+  /** The document trimmed to the path from the root to `ids` (and their children, within depth). */
+  fileAround(fileKey: string, ids: string[], depth: number): Promise<FileResponse> {
+    return this.get<FileResponse>(`/v1/files/${fileKey}?${new URLSearchParams({ ids: ids.join(','), depth: String(depth) })}`);
+  }
+
   /** Temporary render URLs (PNG) per node id; null where Figma could not render the node. */
   images(fileKey: string, ids: string[], scale: number): Promise<Record<string, string | null>> {
     const q = new URLSearchParams({ ids: ids.join(','), format: 'png', scale: String(scale) });
@@ -148,8 +155,10 @@ export class FigmaClient {
     } catch {
       throw new FigmaError('Tidak bisa menghubungi api.figma.com. Periksa koneksi internet.', 502, 'network');
     }
-    if (res.status === 429 && attempt < 2) {
-      const after = Number(res.headers.get('retry-after'));
+    const retryAfter = Number(res.headers.get('retry-after'));
+    // A short burst limit is waited out; a quota that resets in hours is reported at once.
+    if (res.status === 429 && attempt < 2 && !(retryAfter * 1000 > MAX_RETRY_WAIT_MS)) {
+      const after = retryAfter;
       await this.sleep(Math.min(Number.isFinite(after) && after > 0 ? after * 1000 : 5_000 * (attempt + 1), MAX_RETRY_WAIT_MS));
       return this.get<T>(path, attempt + 1);
     }
@@ -166,7 +175,13 @@ export class FigmaClient {
         );
       }
       if (res.status === 404) throw new FigmaError('File atau frame Figma tidak ditemukan. Periksa link-nya.', 404, 'not-found');
-      if (res.status === 429) throw new FigmaError('Batas request Figma tercapai. Coba lagi beberapa menit lagi, atau ambil lebih sedikit layar.', 429, 'upstream');
+      if (res.status === 429) {
+        // Figma says which limit and for how long; a long wait means a plan/seat quota, not a burst.
+        const after = Number(res.headers.get('retry-after'));
+        const kind = [res.headers.get('x-figma-rate-limit-type'), res.headers.get('x-figma-plan-tier')].filter(Boolean).join(', ');
+        const wait = Number.isFinite(after) && after > 0 ? (after >= 3600 ? `sekitar ${Math.ceil(after / 3600)} jam` : `${Math.ceil(after / 60)} menit`) : 'beberapa menit';
+        throw new FigmaError(`Batas request Figma tercapai${kind ? ` (${kind})` : ''}. Coba lagi ${wait} lagi, atau ambil lebih sedikit layar.`, 429, 'upstream');
+      }
       throw new FigmaError(`Figma API error (HTTP ${res.status})${detail ? `: ${detail}` : ''}.`, 502, 'upstream');
     }
     return (await res.json()) as T;
@@ -267,6 +282,85 @@ export function setIdFor(ref: FigmaRef): string {
 const isSetId = (id: string) => /^[A-Za-z0-9_-]{1,100}$/.test(id);
 const isImageName = (name: string) => /^\d{2}-[a-z0-9-]{1,60}\.png$/.test(name);
 
+// Map around a link ------------------------------------------------------------------------
+
+/** Root → … → the node, or null when it is not in the (trimmed) tree. */
+export function findPath(root: FigmaNode, id: string): FigmaNode[] | null {
+  if (root.id === id) return [root];
+  for (const c of root.children ?? []) {
+    const p = findPath(c, id);
+    if (p) return [root, ...p];
+  }
+  return null;
+}
+
+const center = (n: FigmaNode) => (n.absoluteBoundingBox ? { x: n.absoluteBoundingBox.x + n.absoluteBoundingBox.width / 2, y: n.absoluteBoundingBox.y + n.absoluteBoundingBox.height / 2 } : undefined);
+
+/** Siblings nearest to the target on the canvas first (a flow title sits above or beside its screens). */
+export function nearestSiblings(siblings: FigmaNode[], target: FigmaNode, max: number): FigmaNode[] {
+  const t = center(target);
+  const dist = (n: FigmaNode) => {
+    const c = center(n);
+    return t && c ? Math.hypot(c.x - t.x, c.y - t.y) : Number.MAX_SAFE_INTEGER;
+  };
+  return siblings.filter((s) => s.visible !== false).sort((a, b) => dist(a) - dist(b)).slice(0, max);
+}
+
+export interface FigmaLinkMap {
+  fileKey: string;
+  fileName: string;
+  version: string;
+  nodeId?: string;
+  path: { id: string; name: string; type: string }[];
+  /** The node's own children (screens under a section/frame). */
+  inside: FigmaNode[];
+  /** Nodes next to it under the same parent, nearest first. */
+  around: FigmaNode[];
+  /** Pages of the file (for a whole-file link). */
+  pages?: { id: string; name: string; frames: FigmaNode[] }[];
+}
+
+const size = (n: FigmaNode) => (n.absoluteBoundingBox ? ` ${Math.round(n.absoluteBoundingBox.width)}×${Math.round(n.absoluteBoundingBox.height)}` : '');
+const nodeUrl = (fileKey: string, id: string) => `https://www.figma.com/design/${fileKey}/?node-id=${id.replace(/:/g, '-')}`;
+
+function nodeLines(fileKey: string, nodes: FigmaNode[], indent = ''): string[] {
+  return nodes.flatMap((n) => {
+    const kids = (n.children ?? []).filter((c) => c.visible !== false);
+    const screens = kids.filter((c) => SCREEN_TYPES.has(c.type) || CONTAINER_TYPES.has(c.type));
+    return [
+      `${indent}- ${n.type} "${n.name}" — node-id \`${n.id}\`${size(n)}${kids.length ? `, ${kids.length} anak` : ''} (${nodeUrl(fileKey, n.id)})`,
+      ...screens.slice(0, 12).map((c) => `${indent}  - ${c.type} "${c.name}" — node-id \`${c.id}\`${size(c)}`),
+      ...(screens.length > 12 ? [`${indent}  - … ${screens.length - 12} lainnya (buka node induknya dengan get_metadata)`] : []),
+    ];
+  });
+}
+
+export function linkMapMarkdown(title: string, url: string, m: FigmaLinkMap): string {
+  const target = m.path.at(-1);
+  return [
+    `# Peta Figma: ${title}`,
+    '',
+    `Link: ${url}`,
+    `File: ${m.fileName} · fileKey \`${m.fileKey}\` · versi ${m.version}`,
+    '',
+    'Dibuat Cockpit lewat Figma REST API (hanya baca). Pakai fileKey dan node-id di bawah dengan get_metadata / get_screenshot / get_design_context untuk membuka layar mana pun.',
+    ...(m.pages
+      ? ['', '## Halaman & frame teratas', ...m.pages.flatMap((p) => [`### ${p.name} (node-id \`${p.id}\`)`, ...nodeLines(m.fileKey, p.frames)])]
+      : [
+          '',
+          '## Letak node di link',
+          m.path.map((p) => `${p.type} "${p.name}" (\`${p.id}\`)`).join(' → '),
+          '',
+          `## Isi node "${target?.name ?? ''}"`,
+          ...(m.inside.length ? nodeLines(m.fileKey, m.inside) : ['(tidak ada anak; node ini kemungkinan hanya judul/label, cari layarnya di bagian berikut)']),
+          '',
+          `## Di sekitarnya (anak dari "${m.path.at(-2)?.name ?? ''}", terdekat dulu)`,
+          ...(m.around.length ? nodeLines(m.fileKey, m.around) : ['(tidak ada)']),
+        ]),
+    '',
+  ].join('\n');
+}
+
 // Manager ----------------------------------------------------------------------------------
 
 export interface FigmaManagerOptions {
@@ -307,6 +401,80 @@ export class FigmaManager {
   /** Validates a token against Figma; the caller saves it only when this succeeds. */
   async verifyToken(token: string): Promise<FigmaUser> {
     return (await this.client(token)).me();
+  }
+
+  /**
+   * The structure around a link: where the node sits (page → section → …), what is inside it and
+   * what lies next to it. A link to a flow's title bar still leads the AI to the screens below it.
+   */
+  async mapLink(url: string): Promise<FigmaLinkMap> {
+    const ref = parseFigmaUrl(url);
+    if (!ref) throw new FigmaError('Link Figma tidak dikenali.', 400, 'bad-request');
+    const client = await this.client();
+    if (!ref.nodeId) {
+      const file = await client.file(ref.fileKey, 2);
+      const pages = (file.document.children ?? []).map((p) => ({ id: p.id, name: p.name, frames: (p.children ?? []).filter((c) => c.visible !== false).slice(0, 40) }));
+      return { fileKey: ref.fileKey, fileName: file.name, version: file.version, path: [], inside: [], around: [], pages };
+    }
+    // The trimmed tree only reaches the node within `depth` levels; go deeper until it shows.
+    let path: FigmaNode[] | null = null;
+    let meta: { name: string; version: string } = { name: '', version: '' };
+    for (const depth of [4, 7, 11]) {
+      const res = await client.fileAround(ref.fileKey, [ref.nodeId], depth);
+      meta = res;
+      path = findPath(res.document, ref.nodeId);
+      if (path) break;
+    }
+    if (!path) throw new FigmaError('Node di link itu tidak ditemukan di file (mungkin sudah dihapus atau dipindah).', 404, 'not-found');
+    const target = path.at(-1)!;
+    const parent = path.at(-2);
+    const self = (await client.nodes(ref.fileKey, [ref.nodeId], 2)).nodes[ref.nodeId]?.document ?? target;
+    // A page can hold hundreds of frames: only one level there, two under a section or frame.
+    const siblings = parent && parent.type !== 'DOCUMENT' ? ((await client.nodes(ref.fileKey, [parent.id], parent.type === 'CANVAS' ? 1 : 2)).nodes[parent.id]?.document?.children ?? []) : [];
+    return {
+      fileKey: ref.fileKey,
+      fileName: meta.name,
+      version: meta.version,
+      nodeId: ref.nodeId,
+      path: path.filter((n) => n.type !== 'DOCUMENT').map((n) => ({ id: n.id, name: n.name, type: n.type })),
+      inside: (self.children ?? []).filter((c) => c.visible !== false).slice(0, 40),
+      around: nearestSiblings(siblings.filter((s) => s.id !== ref.nodeId), self, 30),
+    };
+  }
+
+  /**
+   * Writes figma-map/<set>.md into the draft's AI workspace for each link (best effort: a link that
+   * fails gets a note instead). Returns the files written.
+   */
+  async writeLinkMaps(draftId: string, links: { title?: string; url: string }[]): Promise<string[]> {
+    if (!(await this.opts.readToken())) return [];
+    const dir = join(this.opts.workspaceFor(draftId), 'figma-map');
+    await mkdir(dir, { recursive: true });
+    const wanted = new Map<string, { title?: string; url: string }>(links.slice(0, 10).flatMap((l) => (parseFigmaUrl(l.url) ? [[`${setIdFor(parseFigmaUrl(l.url)!)}.md`, l] as const] : [])));
+    // Maps of links no longer in the draft go.
+    for (const old of await readdir(dir).catch(() => [] as string[])) if (!wanted.has(old)) await rm(join(dir, old), { force: true });
+    const written: string[] = [];
+    let limited = '';
+    for (const [name, link] of wanted) {
+      const file = join(dir, name);
+      // Figma's API quota is small (a View/Collab seat gets a handful of calls): a map is reused for a day.
+      const age = await stat(file).then((s) => (this.opts.now?.() ?? new Date()).getTime() - s.mtimeMs).catch(() => Infinity);
+      const current = age < MAP_TTL_MS && !(await readFile(file, 'utf-8').catch(() => '')).includes('Gagal dipetakan');
+      if (!current) {
+        let body: string;
+        try {
+          if (limited) throw new FigmaError(limited, 429, 'upstream');
+          body = linkMapMarkdown(link.title || name, link.url, await this.mapLink(link.url));
+        } catch (e) {
+          // Once Figma says the quota is used up, the other links are not tried.
+          if (e instanceof FigmaError && e.status === 429) limited = e.message;
+          body = `# Peta Figma: ${link.title || name}\n\nLink: ${link.url}\n\nGagal dipetakan: ${(e as Error).message}\n`;
+        }
+        await writeFile(file, body, 'utf-8');
+      }
+      written.push(`figma-map/${name}`);
+    }
+    return written;
   }
 
   async listScreens(url: string): Promise<FigmaScreenList> {

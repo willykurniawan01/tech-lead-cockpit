@@ -6,8 +6,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { connectorMiddleware } from './dev-connector.ts';
-import { FigmaClient, FigmaError, FigmaManager, extractTexts, parseFigmaUrl, readFetchedSets, scaleFor, screenChoices, setIdFor, slug, type FigmaNode } from './figma.ts';
-import { figmaContextLine, prepareGeneratorWorkspace } from './generator-runner.ts';
+import { FigmaClient, FigmaError, FigmaManager, extractTexts, linkMapMarkdown, parseFigmaUrl, readFetchedSets, scaleFor, screenChoices, setIdFor, slug, type FigmaNode } from './figma.ts';
+import { figmaContextLine, figmaMapLine, prepareGeneratorWorkspace } from './generator-runner.ts';
 
 const KEY = 'AbCdEf1234567890XyZ';
 const box = (x: number, y: number, width: number, height: number) => ({ x, y, width, height });
@@ -292,5 +292,87 @@ describe('connector /figma routes', () => {
     expect(res.status).toBe(401);
     expect((await res.json()).error).toMatch(/Token Figma tidak valid/);
     expect((await call('/figma/save-token', { token: '' })).status).toBe(400);
+  });
+});
+
+describe('map around a link', () => {
+  const MAP_KEY = 'MapKey1234567890Abc';
+  const frame = (id: string, name: string, x: number, y: number, children: FigmaNode[] = []): FigmaNode => ({ id, name, type: 'FRAME', absoluteBoundingBox: box(x, y, 375, 812), children });
+  const title: FigmaNode = { id: '5:3', name: 'Ganti Switching', type: 'FRAME', absoluteBoundingBox: box(0, -120, 375, 80), children: [] };
+  const screens = [frame('5:4', 'Konfigurasi global', 0, 0, [frame('5:41', 'Modal konfirmasi', 0, 0)]), frame('5:5', 'Auto switch', 500, 0), frame('5:9', 'Flow lain jauh', 9000, 9000)];
+  const section: FigmaNode = { id: '5:2', name: 'Switching Management', type: 'SECTION', absoluteBoundingBox: box(-50, -200, 10000, 10000), children: [title, ...screens] };
+  const page: FigmaNode = { id: '5:1', name: 'Switching', type: 'CANVAS', children: [section] };
+  const link = `https://www.figma.com/design/${MAP_KEY}/CMS?node-id=5-3`;
+
+  function api(opts: { quota?: boolean } = {}) {
+    const calls: string[] = [];
+    const json = (status: number, body: unknown, headers: Record<string, string> = {}) => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json', ...headers } });
+    const fetchImpl = async (url: string) => {
+      calls.push(url);
+      const u = new URL(url);
+      if (opts.quota) return json(429, { status: 429, err: 'Rate limit' }, { 'Retry-After': '331200', 'X-Figma-Rate-Limit-Type': 'low', 'X-Figma-Plan-Tier': 'pro' });
+      const depth = Number(u.searchParams.get('depth'));
+      if (u.pathname === `/v1/files/${MAP_KEY}`) {
+        // Trimmed to the path; the node only shows once depth reaches it (page 1, section 2, title 3).
+        const trimmed = { ...page, children: depth >= 4 ? [{ ...section, children: [title] }] : [] };
+        return json(200, { name: 'CMS Revamp', version: '42', lastModified: '', document: { id: '0:0', name: 'Document', type: 'DOCUMENT', children: [trimmed] } });
+      }
+      if (u.pathname === `/v1/files/${MAP_KEY}/nodes`) {
+        const id = u.searchParams.get('ids')!;
+        return json(200, { name: 'CMS Revamp', version: '42', lastModified: '', nodes: { [id]: { document: id === '5:2' ? section : title } } });
+      }
+      return json(404, { err: 'unknown' });
+    };
+    return { fetchImpl, calls };
+  }
+
+  it('finds where a title bar sits and lists the screens next to it, nearest first', async () => {
+    const { fetchImpl } = api();
+    const m = new FigmaManager({ readToken: async () => 'figd_good', workspaceFor: () => '/tmp', fetch: fetchImpl, sleep: async () => {} });
+    const map = await m.mapLink(link);
+    expect(map.path.map((p) => p.name)).toEqual(['Switching', 'Switching Management', 'Ganti Switching']);
+    expect(map.inside).toEqual([]);
+    expect(map.around.map((n) => n.name)).toEqual(['Konfigurasi global', 'Auto switch', 'Flow lain jauh']);
+    const md = linkMapMarkdown('Switching Management', link, map);
+    expect(md).toContain('CANVAS "Switching" (`5:1`) → SECTION "Switching Management" (`5:2`) → FRAME "Ganti Switching" (`5:3`)');
+    expect(md).toContain('node ini kemungkinan hanya judul/label');
+    expect(md).toContain('- FRAME "Konfigurasi global" — node-id `5:4` 375×812, 1 anak');
+    expect(md).toContain('  - FRAME "Modal konfirmasi" — node-id `5:41`');
+    expect(md).toContain(`fileKey \`${MAP_KEY}\``);
+  });
+
+  it('writes one map per link, reuses it for a day, and stops at a used-up quota without waiting', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'tlc-figma-map-'));
+    try {
+      const ok = api();
+      const m = new FigmaManager({ readToken: async () => 'figd_good', workspaceFor: () => dir, fetch: ok.fetchImpl, sleep: async () => {} });
+      expect(await m.writeLinkMaps('d', [{ title: 'Switching', url: link }])).toEqual([`figma-map/${MAP_KEY}_5-3.md`]);
+      const used = ok.calls.length;
+      await m.writeLinkMaps('d', [{ title: 'Switching', url: link }]);
+      expect(ok.calls.length).toBe(used);
+
+      const waits: number[] = [];
+      const limited = api({ quota: true });
+      const m2 = new FigmaManager({ readToken: async () => 'figd_good', workspaceFor: () => dir, fetch: limited.fetchImpl, sleep: async (ms) => void waits.push(ms) });
+      const other = `https://www.figma.com/design/${MAP_KEY}/CMS?node-id=5-4`;
+      const third = `https://www.figma.com/design/${MAP_KEY}/CMS?node-id=5-5`;
+      await m2.writeLinkMaps('d', [{ url: other }, { url: third }]);
+      // One call: no retry for an hours-long wait, and the next link is not tried.
+      expect(limited.calls).toHaveLength(1);
+      expect(waits).toEqual([]);
+      const note = await readFile(join(dir, 'figma-map', `${MAP_KEY}_5-4.md`), 'utf-8');
+      expect(note).toContain('Gagal dipetakan: Batas request Figma tercapai (low, pro). Coba lagi sekitar 92 jam lagi');
+      // The first link's map is gone: it is no longer in the draft.
+      expect(await readdir(join(dir, 'figma-map'))).toEqual([`${MAP_KEY}_5-4.md`, `${MAP_KEY}_5-5.md`]);
+      expect(await new FigmaManager({ readToken: async () => null, workspaceFor: () => dir }).writeLinkMaps('d', [{ url: link }])).toEqual([]);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('tells Claude to walk the map with the Figma tools', () => {
+    expect(figmaMapLine(['K_5-3.md'], 'claude')).toContain('Telusuri sendiri sampai layar yang dibutuhkan ketemu');
+    expect(figmaMapLine(['K_5-3.md'], 'claude')).toContain('figma-map/K_5-3.md');
+    expect(figmaMapLine(['K_5-3.md'], '9router')).toContain('Pakai nama layar dan link di peta');
   });
 });

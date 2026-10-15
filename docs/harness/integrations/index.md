@@ -59,6 +59,7 @@ graph TD
 | File Path | Komponen | Deskripsi & Tanggung Jawab |
 |---|---|---|
 | [`connector/figma.ts`](../../../connector/figma.ts) | Figma Client & Manager | `parseFigmaUrl` (link file/design/proto/board, branch, `node-id` 1-2 atau 1:2), `FigmaClient` (header `X-Figma-Token`, retry sekali pada 429 sesuai `Retry-After`, pesan error 401/403/404 yang jelas), deteksi layar (`screenChoices`), ekstraksi teks urut baca (`extractTexts`), render PNG dengan skala sisi panjang ~1568px, dan penulisan hasil ke `workspaces/<draftId>/figma/<fileKey>_<node>/`. |
+| `FigmaManager.mapLink` / `writeLinkMaps` | Peta di sekitar link | `GET /v1/files/:key?ids=&depth=` (dinaikkan 4→7→11 sampai node ketemu) untuk jalur dari root, lalu `nodes` node itu (depth 2) dan induknya (depth 1 untuk halaman, 2 untuk section/frame). Hasilnya `figma-map/*.md` di workspace AI, di-cache 24 jam. 429 dengan `Retry-After` lebih lama dari 30 detik tidak di-retry; pesan errornya memuat `x-figma-rate-limit-type`/`x-figma-plan-tier` dan perkiraan waktu tunggu. |
 | [`src/lib/figma/client.ts`](../../../src/lib/figma/client.ts) | Figma Frontend Bridge | Client UI ke `/api/connector/figma/*`; thumbnail diambil sebagai blob karena endpoint gambar tetap butuh header `X-TLC-Client`. |
 | [`src/lib/figma/types.ts`](../../../src/lib/figma/types.ts) | Kontrak Data | `FigmaStatus`, `FigmaScreenList`, `FigmaFetchedSet` (manifest per set, termasuk flag `stale`). |
 

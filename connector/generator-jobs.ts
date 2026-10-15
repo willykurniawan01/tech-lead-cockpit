@@ -48,7 +48,8 @@ class GeneratorJobs {
     return s.job;
   }
 
-  async start(req: StartGeneratorJobRequest): Promise<GeneratorJob> {
+  /** `mapFigma` writes figma-map/ (structure around each Figma link) before the AI starts. */
+  async start(req: StartGeneratorJobRequest, hooks: { mapFigma?: (draftId: string, links: { title?: string; url: string }[]) => Promise<string[]> } = {}): Promise<GeneratorJob> {
     this.prune();
     const running = this.latestForDraft(req.draftId);
     if (running?.status === 'running') throw new JobConflictError(running);
@@ -77,6 +78,12 @@ class GeneratorJobs {
       throw e;
     }
 
+    const links = (req.figmaLinks ?? []).filter((l) => /^https:\/\/([\w-]+\.)*figma\.com\//.test(l.url));
+    if (links.length && hooks.mapFigma) {
+      push({ kind: 'info', text: 'Memetakan struktur Figma di sekitar link…' });
+      const maps = await Promise.race([hooks.mapFigma(req.draftId, links), new Promise<string[]>((r) => setTimeout(() => r([]), 30_000))]).catch(() => [] as string[]);
+      if (maps.length) push({ kind: 'info', text: `Peta Figma siap: ${maps.length} link.` });
+    }
     const ws = await prepareGeneratorWorkspace({ ...req, servicesRoot, provider: ai.provider, kind, scopeAgreed: Boolean(req.scopeAgreed) });
     const providerLabel = ai.provider === 'claude' ? 'Claude CLI' : ai.provider === 'antigravity' ? 'Antigravity CLI' : ai.provider === '9router' ? '9Router' : 'InferHub';
     push({ kind: 'info', text: `Menjalankan ${providerLabel}${ai.model ? ` (${ai.model})` : ''}…` });

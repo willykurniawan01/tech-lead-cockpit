@@ -28,7 +28,7 @@ import type { AppSettings, SecretId, SettingsResponse } from '../src/lib/setting
 import { EstimateInputError, EstimateManager } from './estimate/manager.ts';
 import type { EstimateProject, EstimateRequest } from '../src/lib/estimate/types.ts';
 import { deleteDoc, listDocs, saveDoc, unlockDoc, workspaceDir } from './workspace-docs.ts';
-import { FigmaError, FigmaManager } from './figma.ts';
+import { FigmaError, FigmaManager, linkMapMarkdown } from './figma.ts';
 import { RosterInputError, RosterStore } from './roster/store.ts';
 import { DEFAULT_DAYS, GitActivity } from './roster/git-activity.ts';
 import { ReleaseManager } from './releases/manager.ts';
@@ -1764,6 +1764,11 @@ async function handleFigma(route: string, url: URL, req: IncomingMessage, res: S
       return send(res, 200, { ok: true, user });
     }
     if (route === 'GET /figma/screens') return send(res, 200, await figma.listScreens(url.searchParams.get('url') ?? ''));
+    // The structure around a link (path, children, nearby frames); read only.
+    if (route === 'GET /figma/map') {
+      const link = url.searchParams.get('url') ?? '';
+      return send(res, 200, { markdown: linkMapMarkdown(url.searchParams.get('title') || 'Link', link, await figma.mapLink(link)) });
+    }
     if (route === 'POST /figma/fetch') {
       const body = await readJson<{ draftId?: string; url?: string; title?: string; screenIds?: string[] }>(req, 64 * 1024);
       const draftId = draftIdOf(body.draftId);
@@ -1803,7 +1808,7 @@ async function handleGeneratorJobs(route: string, url: URL, req: IncomingMessage
     requireFields(body, ['draftId', 'prompt', 'tadMarkdown']);
     if (!isValidDraftId(body.draftId)) throw new ConfluenceError('draftId tidak valid.', 400, 'bad-request');
     try {
-      return send(res, 202, await jobs.start(body));
+      return send(res, 202, await jobs.start(body, { mapFigma: (draftId, links) => defaultFigma().writeLinkMaps(draftId, links) }));
     } catch (e) {
       if (e instanceof JobConflictError) return send(res, 409, { error: e.message, code: 'conflict', job: e.job });
       if (/Folder codebase/.test((e as Error).message)) throw new ConfluenceError((e as Error).message, 400, 'bad-request');
