@@ -6,7 +6,6 @@ import { promisify } from 'node:util';
 import { collapseEmbeddedHtml, expandEmbeddedHtml } from '../src/lib/markdown/embedded-html.ts';
 import type { FigmaFetchedSet } from '../src/lib/figma/types.ts';
 import { isPdfEncrypted } from './workspace-docs.ts';
-import { FIGMA_READ_ONLY_RULE } from './ai-providers.ts';
 import { readFetchedSets } from './figma.ts';
 import { DATA_DIR } from './paths.ts';
 
@@ -88,7 +87,7 @@ export function figmaToolHint(provider: RunChatOptions['provider'], none = false
   const hint =
     provider !== 'claude'
       ? `kamu tidak bisa membuka Figma; ${fallback}`
-      : `bila tool Figma (get_metadata, get_screenshot, get_design_context) tersedia, pakai untuk membuka link itu. Bila link hanya menunjuk judul/label atau layar yang dicari tidak ada di bawahnya, telusuri sendiri dengan use_figma (induk node, frame di sekitarnya, halaman lain) lalu buka layarnya dengan get_screenshot. ${FIGMA_READ_ONLY_RULE} Bila tool tidak tersedia atau terputus, jangan berhenti atau meminta izin: lanjutkan tanpa Figma, ${fallback} Sebut di chat layar mana yang belum terverifikasi.`;
+      : `baca lewat Figwright (tool mcp__figwright__*: plugin Figwright di aplikasi Figma desktop user, tanpa kuota API). Urutan: ping → list_files → use_file untuk file yang namanya cocok dengan link → get_design_context dengan URL link atau node-id-nya (node-id 31698-69712 ditulis 31698:69712; detail compact untuk melihat struktur). Bila node hanya judul/label, cari layar di sekitarnya dengan get_metadata/get_pages lalu search_nodes (nama, type FRAME/SECTION) atau get_design_context pada induk/halamannya, lalu lihat layarnya dengan get_screenshot. Figwright hanya untuk membaca; tool tulisnya tidak diizinkan. Bila ping menyatakan plugin belum terhubung atau file belum terbuka, jangan berhenti atau meminta izin: pakai figma/ dan figma-map/ bila ada, tool Figma resmi (get_metadata, get_screenshot) hanya seperlunya karena kuotanya sangat kecil, lalu ${fallback} Sebut di chat layar mana yang belum terverifikasi dan bahwa plugin Figwright perlu dibuka di file itu.`;
   // `none`: the hint opens a sentence.
   return none ? hint[0].toUpperCase() + hint.slice(1) : hint;
 }
@@ -97,7 +96,7 @@ export function figmaToolHint(provider: RunChatOptions['provider'], none = false
 export function figmaMapLine(files: string[], provider: RunChatOptions['provider']): string {
   const use =
     provider === 'claude'
-      ? 'Bila link menunjuk judul, label, atau bagian kecil, cari section/frame layar yang relevan di peta (bagian "Isi node" dan "Di sekitarnya"), lalu buka dengan tool Figma get_metadata / get_screenshot / get_design_context memakai fileKey dan node-id dari peta. Telusuri sendiri sampai layar yang dibutuhkan ketemu (bila peta gagal dibuat atau belum cukup, pakai use_figma secara hanya-baca); jangan meminta link lain sebelum peta ini habis dicek.'
+      ? 'Bila link menunjuk judul, label, atau bagian kecil, cari section/frame layar yang relevan di peta (bagian "Isi node" dan "Di sekitarnya"), lalu buka dengan Figwright (get_design_context / get_screenshot) memakai node-id dari peta. Telusuri sendiri sampai layar yang dibutuhkan ketemu (bila peta gagal dibuat atau belum cukup, telusuri dengan Figwright); jangan meminta link lain sebelum peta ini habis dicek.'
       : 'Pakai nama layar dan link di peta sebagai acuan task UI.';
   return `- figma-map/: peta struktur Figma di sekitar tiap link, dibuat Cockpit (${files.map((f) => `figma-map/${f}`).join(', ')}): letak node (halaman → section → …), isinya, dan frame di sekitarnya beserta node-id. ${use}`;
 }

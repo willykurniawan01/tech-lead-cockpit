@@ -1,7 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import { DEFAULT_AI_SELECTION, isAiSelection } from '../src/lib/ai/types.ts';
 import type { GeneratorJob, GeneratorJobEvent, StartGeneratorJobRequest } from '../src/lib/generator/types.ts';
-import { FIGMA_EXPLORE_TOOL, FIGMA_READ_TOOLS, startProviderRun, terminateProviderProcess, type ProviderRun } from './ai-providers.ts';
+import { FIGMA_READ_TOOLS, startProviderRun, terminateProviderProcess, type ProviderRun } from './ai-providers.ts';
+import { FIGWRIGHT_READ_TOOLS, figwrightMcpConfig } from './figwright.ts';
 import { prepareGeneratorWorkspace, readGeneratorResult } from './generator-runner.ts';
 import { diffSnapshots, resolveServicesRoot, snapshotRepos, type RepoSnapshot } from './services.ts';
 
@@ -95,9 +96,10 @@ class GeneratorJobs {
         timeoutMs: JOB_TIMEOUT_MS,
         onEvent: push,
         readOnlyDirs: servicesRoot ? [servicesRoot] : [],
-        // Figma links in the TAD can be opened through the user's claude.ai Figma connector; use_figma
-        // (to walk the file) under a read-only rule in the prompt.
-        allowedMcpTools: [...FIGMA_READ_TOOLS, FIGMA_EXPLORE_TOOL],
+        // Figma is read through Figwright (the plugin in the user's Figma app, no API quota), read
+        // tools only; the claude.ai Figma connector's read tools stay as a fallback.
+        mcpConfig: figwrightMcpConfig(),
+        allowedMcpTools: [...FIGWRIGHT_READ_TOOLS, ...FIGMA_READ_TOOLS],
         resumeSession,
       });
       state.run = run;

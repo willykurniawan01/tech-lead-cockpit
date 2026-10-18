@@ -5,7 +5,8 @@ import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { agyReadAccess, grantAgyReadAccess } from './agy-settings.ts';
-import { claudeEditArgs, claudeReadOnlyDirArgs, FIGMA_EXPLORE_TOOL, FIGMA_READ_TOOLS } from './ai-providers.ts';
+import { claudeEditArgs, claudeReadOnlyDirArgs, FIGMA_READ_TOOLS } from './ai-providers.ts';
+import { FIGWRIGHT_READ_TOOLS, FIGWRIGHT_VERSION, figwrightMcpConfig, findNpx } from './figwright.ts';
 import { diffSnapshots, resolveServicesRoot, snapshotRepos } from './services.ts';
 import { figmaToolHint, prepareGeneratorWorkspace, readGeneratorResult } from './generator-runner.ts';
 import { isPdfEncrypted, listDocs, saveDoc, safeDocName, workspaceDir } from './workspace-docs.ts';
@@ -139,17 +140,27 @@ describe('claudeEditArgs', () => {
     expect(claudeEditArgs()).toEqual(['--allowedTools', 'Read,Glob,Grep,Edit,Write', '--permission-mode', 'acceptEdits']);
   });
 
-  it('lets the generator walk Figma with use_figma under a read-only rule', () => {
-    expect(FIGMA_EXPLORE_TOOL).toBe('mcp__claude_ai_Figma__use_figma');
-    expect(claudeEditArgs([], [...FIGMA_READ_TOOLS, FIGMA_EXPLORE_TOOL])[1]).toContain(',mcp__claude_ai_Figma__use_figma');
-    expect(figmaToolHint('claude')).toContain('telusuri sendiri dengan use_figma');
-    expect(figmaToolHint('claude')).toContain('use_figma HANYA untuk MEMBACA');
-    expect(figmaToolHint('claude')).toContain('DILARANG mengubah apa pun');
-    expect(figmaToolHint('9router')).not.toContain('use_figma');
+  it('reads Figma through Figwright: its read tools only, the server handed over per run', () => {
+    expect(FIGWRIGHT_VERSION).toMatch(/^\d+\.\d+\.\d+$/);
+    const allowed = claudeEditArgs([], [...FIGWRIGHT_READ_TOOLS, ...FIGMA_READ_TOOLS])[1].split(',');
+    expect(allowed).toContain('mcp__figwright__get_design_context');
+    expect(allowed).toContain('mcp__figwright__get_screenshot');
+    expect(allowed).toContain('mcp__figwright__use_file');
+    // No write tool (Figma or disk), no full-page dump, and use_figma is gone.
+    for (const t of ['set_fills', 'create_frame', 'delete_nodes', 'batch', 'navigate_to_page', 'save_screenshots', 'export_pdf', 'get_document']) expect(allowed).not.toContain(`mcp__figwright__${t}`);
+    expect(allowed.join(',')).not.toContain('use_figma');
+    const cfg = JSON.parse(figwrightMcpConfig('/Users/me/.local/bin/npx'));
+    expect(cfg.mcpServers.figwright).toEqual({ command: '/Users/me/.local/bin/npx', args: ['-y', `@figwright/mcp@${FIGWRIGHT_VERSION}`], env: { PATH: '/Users/me/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin' } });
+    expect(findNpx('/Users/me/.local/bin/node', (p) => p === '/Users/me/.local/bin/npx')).toBe('/Users/me/.local/bin/npx');
+    expect(findNpx('/x/node', () => false)).toBe('npx');
+    expect(figmaToolHint('claude')).toContain('baca lewat Figwright');
+    expect(figmaToolHint('claude')).toContain('ping → list_files → use_file');
+    expect(figmaToolHint('claude')).toContain('plugin Figwright perlu dibuka');
+    expect(figmaToolHint('9router')).not.toContain('Figwright');
   });
 
   it('tells Claude to use the Figma tools when there and go on without them when not', () => {
-    expect(figmaToolHint('claude')).toContain('bila tool Figma');
+    expect(figmaToolHint('claude')).toContain('tool Figma resmi (get_metadata, get_screenshot) hanya seperlunya');
     expect(figmaToolHint('claude')).toContain('jangan berhenti atau meminta izin');
     expect(figmaToolHint('antigravity', true)).toBe('Kamu tidak bisa membuka Figma; cantumkan link-nya pada task UI terkait dan gunakan ekspor layar di docs/ bila ada.');
   });
