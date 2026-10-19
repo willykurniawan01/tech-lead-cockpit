@@ -10,6 +10,7 @@
   import { DEFAULT_HOLIDAYS, coveredYears } from '../lib/estimate/holidays';
   import { lockAssignments, recommendAssignees, schedule, type ScheduleResult } from '../lib/estimate/schedule';
   import { jira } from '../lib/jira/client';
+  import { jiraAssignTargets, splitByCurrent } from '../lib/estimate/jira-assign';
   import type { JiraUser } from '../lib/jira/types';
   import { ESTIMATE_ROLES, ROLE_LABELS, roleOf, type Developer, type DeveloperJiraLoad, type EstimateJob, type EstimateProject, type EstimateRole, type EstimateTask, type Holiday, type JiraCandidate } from '../lib/estimate/types';
   import { loadServicesRoot } from '../tad/generator-client';
@@ -305,6 +306,49 @@
     recFor = null;
   }
 
+  // The developers assigned here, pushed to the tasks' Jira tickets (after a preview of what changes).
+  let assigningJira = $state(false);
+  const jiraAssignable = $derived(jiraAssignTargets(project, scopeTasks));
+
+  async function assignInJira() {
+    const t = jiraAssignable;
+    if (!t.targets.length) {
+      const why = [t.noKey.length ? `${t.noKey.length} task belum punya tiket Jira` : '', t.noAccount.length ? `${t.noAccount.length} task milik developer yang belum terhubung ke akun Jira` : '', t.unassigned ? `${t.unassigned} task masih "Otomatis"` : ''].filter(Boolean);
+      return toasts.show(`Tidak ada task yang bisa di-assign ke Jira${why.length ? `: ${why.join(', ')}.` : '.'}`, 'err', 6000);
+    }
+    assigningJira = true;
+    try {
+      const { change, same, missing } = splitByCurrent(t.targets, await jira.assignees(t.targets.map((x) => x.key)));
+      if (!change.length) {
+        toasts.show(`Semua ${same.length} tiket sudah ter-assign sesuai estimasi.${missing.length ? ` ${missing.length} tiket tidak ditemukan di Jira.` : ''}`, 'ok', 5000);
+        return;
+      }
+      const lines = change.slice(0, 12).map((c) => `• ${c.key} → ${c.developer}${c.current ? ` (sekarang: ${c.current})` : ' (belum ada assignee)'}`);
+      const notes = [
+        same.length ? `${same.length} tiket sudah sesuai, tidak diubah.` : '',
+        t.unassigned ? `${t.unassigned} task masih "Otomatis" tidak ikut (kunci dulu bila ingin ikut).` : '',
+        t.noKey.length ? `${t.noKey.length} task belum punya tiket Jira.` : '',
+        t.noAccount.length ? `${t.noAccount.length} task: developer belum terhubung ke akun Jira (${[...new Set(t.noAccount.map((x) => x.developer))].join(', ')}).` : '',
+        t.conflicts.length ? `${t.conflicts.length} tiket dipakai beberapa task dengan developer berbeda, dilewati: ${t.conflicts.map((c) => c.key).join(', ')}.` : '',
+        missing.length ? `${missing.length} tiket tidak ditemukan di Jira: ${missing.join(', ')}.` : '',
+      ].filter(Boolean);
+      const ok = await confirmDialog({
+        title: `Assign ${change.length} tiket di Jira?`,
+        message: [...lines, ...(change.length > 12 ? [`… dan ${change.length - 12} lainnya`] : []), '', ...notes].join('\n'),
+        confirmText: 'Assign di Jira',
+      });
+      if (!ok) return;
+      const results = await jira.assign(change.map((c) => ({ key: c.key, accountId: c.accountId })), project.name);
+      const failed = results.filter((r) => !r.ok);
+      if (failed.length) toasts.show(`${results.length - failed.length} tiket di-assign, ${failed.length} gagal: ${failed.map((f) => `${f.key} (${f.error})`).join('; ')}`, 'err', 10000);
+      else toasts.show(`${results.length} tiket di-assign di Jira.`, 'ok', 4000);
+    } catch (e) {
+      toasts.show((e as Error).message, 'err');
+    } finally {
+      assigningJira = false;
+    }
+  }
+
   async function lockAll() {
     const ok = await confirmDialog({
       title: 'Kunci rekomendasi?',
@@ -586,6 +630,11 @@
             {/if}
             {#if unassigned}
               <button class="btn btn-ghost btn-sm" onclick={lockAll} title="Kunci task yang masih Otomatis ke developer pilihan penjadwal">Kunci {unassigned} rekomendasi</button>
+            {/if}
+            {#if jiraAssignable.targets.length || jiraAssignable.noAccount.length}
+              <button class="btn btn-sm" onclick={assignInJira} disabled={assigningJira} title="Set assignee tiket Jira sesuai developer yang di-assign di sini (dicek dulu, lalu dikonfirmasi)">
+                <Icon name="jira" size={12} /> {assigningJira ? 'Memeriksa Jira…' : `Assign ke Jira (${jiraAssignable.targets.length})`}
+              </button>
             {/if}
           </div>
         </div>

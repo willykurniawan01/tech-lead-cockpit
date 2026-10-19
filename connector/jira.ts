@@ -296,6 +296,25 @@ export class JiraClient {
     return { key: data.key, url: this.browseUrl(data.key) };
   }
 
+  /** Current assignee per issue key (null = unassigned); keys Jira doesn't return are left out. */
+  async assignees(keys: string[]): Promise<Record<string, { accountId: string; displayName: string } | null>> {
+    const valid = [...new Set(keys.filter((k) => /^[A-Z][A-Z0-9]{1,9}-\d{1,6}$/.test(k)))];
+    if (!valid.length) return {};
+    const issues = await this.searchRaw(`key in (${valid.join(',')})`, ['assignee'], valid.length);
+    return Object.fromEntries(
+      issues.map((i) => {
+        const a = i.fields?.assignee;
+        return [String(i.key), a ? { accountId: String(a.accountId || a.name || a.key || ''), displayName: String(a.displayName || '') } : null];
+      }),
+    );
+  }
+
+  /** Sets the issue's assignee: an account id on Cloud, the user name on Data Center. */
+  async assignIssue(issueKey: string, accountId: string): Promise<void> {
+    const cloud = this.cfg.flavor === 'cloud';
+    await this.request<void>(`/rest/api/${cloud ? 3 : 2}/issue/${encodeURIComponent(issueKey)}/assignee`, { method: 'PUT', body: JSON.stringify(cloud ? { accountId } : { name: accountId }) });
+  }
+
   browseUrl(key: string): string {
     return `${this.base}/browse/${key}`;
   }

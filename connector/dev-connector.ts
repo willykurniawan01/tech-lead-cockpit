@@ -508,6 +508,39 @@ export function connectorMiddleware(env: Env, deps: ConnectorDeps) {
         return send(res, 200, issue);
       }
 
+      // Assignees: read the current ones (preview), then set the ones the user confirmed.
+      if (route === 'POST /jira/assignees' || route === 'POST /jira/assign') {
+        const { cfg: jCfg } = await loadJiraConfig(env);
+        if (!jCfg) throw new JiraError('Jira belum dikonfigurasi.', 503, 'not-configured' as any);
+        const client = new JiraClient(jCfg);
+        const KEY = /^[A-Z][A-Z0-9]{1,9}-\d{1,6}$/;
+        if (route === 'POST /jira/assignees') {
+          const body = await readJson<{ keys?: unknown }>(req, 64 * 1024);
+          const keys = (Array.isArray(body.keys) ? body.keys.map(String) : []).filter((k) => KEY.test(k)).slice(0, 300);
+          return send(res, 200, await client.assignees(keys));
+        }
+        const body = await readJson<{ items?: unknown; project?: unknown }>(req, 64 * 1024);
+        const items = (Array.isArray(body.items) ? body.items : [])
+          .map((i) => ({ key: String((i as Record<string, unknown>)?.key ?? ''), accountId: String((i as Record<string, unknown>)?.accountId ?? '').slice(0, 128) }))
+          .filter((i) => KEY.test(i.key) && i.accountId)
+          .slice(0, 300);
+        if (!items.length) throw new JiraError('Tidak ada task yang bisa di-assign.', 400, 'bad-request');
+        const results: { key: string; ok: boolean; error?: string }[] = [];
+        for (const i of items) {
+          try {
+            await client.assignIssue(i.key, i.accountId);
+            results.push({ key: i.key, ok: true });
+          } catch (e) {
+            results.push({ key: i.key, ok: false, error: (e as Error).message });
+          }
+        }
+        const ok = results.filter((r) => r.ok).length;
+        await deps
+          .appendAudit({ ts: new Date().toISOString(), action: 'jira.assign', result: ok === results.length ? 'success' : 'failure', spaceKey: String(body.project ?? '').slice(0, 100), title: `${ok}/${results.length} task di-assign`, attachments: 0, jiraKeys: results.filter((r) => r.ok).map((r) => r.key) })
+          .catch(() => {});
+        return send(res, 200, results);
+      }
+
       if (route === 'GET /jira/users' || route === 'POST /jira/load' || route === 'POST /jira/candidates') {
         const { cfg: jCfg } = await loadJiraConfig(env);
         if (!jCfg) throw new JiraError('Jira belum dikonfigurasi.', 503, 'not-configured' as any);

@@ -89,6 +89,19 @@ Setiap kandidat membawa alasan yang ditampilkan di UI (mulai kapan, proyek lain,
 
 ---
 
+## 🔗 Assign ke Jira dari Estimasi
+
+Assign developer di menu **Estimasi** (`EstimateTask.assigneeId`) awalnya hanya dipakai penjadwal di Cockpit. Tombol **Assign ke Jira (N)** di bagian Task ([`EstimatePanel.svelte`](../../../src/projects/EstimatePanel.svelte)) mengirimnya ke tiket Jira:
+
+1. `jiraAssignTargets` ([`src/lib/estimate/jira-assign.ts`](../../../src/lib/estimate/jira-assign.ts)) memasangkan task estimasi dengan baris Development Scope lewat id `draftId::title`. Yang diambil hanya task yang di-assign manual, punya key Jira, dan developernya terhubung ke akun Jira. Task "Otomatis" tidak ikut (kunci dulu). Satu tiket yang dipakai beberapa task dengan developer berbeda dilewati sebagai konflik.
+2. `POST /jira/assignees` membaca assignee saat ini (`JiraClient.assignees`, JQL `key in (…)`). `splitByCurrent` hanya mengirim yang berbeda.
+3. Dialog konfirmasi menampilkan tiap perubahan (`KEY → developer (sekarang: …)`) beserta yang dilewati dan alasannya.
+4. `POST /jira/assign` → `JiraClient.assignIssue` (`PUT /rest/api/3/issue/{key}/assignee {accountId}` di Cloud, `/rest/api/2/… {name}` di Data Center). Hasilnya per key, dan dicatat di audit `jira.assign`.
+
+Tiket yang dibuat dari dialog Jira di TAD belum membawa assignee. Setelah tiket dibuat, gunakan tombol ini.
+
+---
+
 ## 🛠️ Panduan Development & Debugging
 
 ### Menjalankan Test Jadwal & Kalender Libur

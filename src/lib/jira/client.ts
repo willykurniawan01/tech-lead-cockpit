@@ -55,6 +55,10 @@ export const jira = {
   issueTypes: (project: string) => call<{ id: string; name: string }[]>(`/jira/issue-types?project=${encodeURIComponent(project)}`),
   /** Project, type, epic, labels and components shared by these tickets (a TAD's existing tasks). */
   tadTemplate: (keys: string[]) => post<TadTicketTemplate>('/jira/tad-template', { keys }),
+  /** Current assignee per issue key (null = unassigned). */
+  assignees: (keys: string[]) => post<Record<string, { accountId: string; displayName: string } | null>>('/jira/assignees', { keys }),
+  /** Sets assignees in Jira (accountId on Cloud, user name on Data Center); one result per key. */
+  assign: (items: { key: string; accountId: string }[], project?: string) => post<{ key: string; ok: boolean; error?: string }[]>('/jira/assign', { items, project }),
   /** Creates one ticket per task; an existing ticket with the same summary is linked instead. */
   createTadTickets: (req: TadTicketRequest) => post<TadTicketResult[]>('/jira/tad-tickets', req),
 };

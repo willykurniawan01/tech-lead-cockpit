@@ -177,6 +177,22 @@ describe('Jira Connector Module', () => {
       }));
       expect(await client.getUser('not-found-id')).toBeNull();
     });
+    it('sets an assignee: accountId on Cloud, user name on Data Center, and reads current ones', async () => {
+      const calls: { url: string; init: RequestInit }[] = [];
+      vi.stubGlobal('fetch', vi.fn(async (url: string, init: RequestInit) => {
+        calls.push({ url, init });
+        if (url.includes('/search/jql')) return { ok: true, status: 200, json: async () => ({ issues: [{ key: 'MU-1', fields: { assignee: { accountId: 'acc-a', displayName: 'Agus' } } }, { key: 'MU-2', fields: { assignee: null } }], isLast: true }) };
+        return { ok: true, status: 204, json: async () => ({}) };
+      }));
+      await new JiraClient(config).assignIssue('MU-1', 'acc-a');
+      expect(calls[0].url).toBe('https://acme.atlassian.net/rest/api/3/issue/MU-1/assignee');
+      expect(calls[0].init.method).toBe('PUT');
+      expect(JSON.parse(String(calls[0].init.body))).toEqual({ accountId: 'acc-a' });
+      await new JiraClient({ ...config, flavor: 'datacenter' as const }).assignIssue('MU-2', 'agus.s');
+      expect(calls[1].url).toBe('https://acme.atlassian.net/rest/api/2/issue/MU-2/assignee');
+      expect(JSON.parse(String(calls[1].init.body))).toEqual({ name: 'agus.s' });
+      expect(await new JiraClient(config).assignees(['MU-1', 'MU-2', 'bad key'])).toEqual({ 'MU-1': { accountId: 'acc-a', displayName: 'Agus' }, 'MU-2': null });
+      expect(decodeURIComponent(calls[2].url)).toContain('key in (MU-1,MU-2)');
+    });
   });
 });
-

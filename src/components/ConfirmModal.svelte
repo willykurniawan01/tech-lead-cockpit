@@ -115,6 +115,10 @@
     line-height: 1.5;
     color: var(--text-2);
     word-break: break-word;
+    /* A list in the message (one item per line) keeps its lines; long lists scroll. */
+    white-space: pre-line;
+    max-height: 50vh;
+    overflow-y: auto;
   }
   .confirm-actions {
     display: flex;
