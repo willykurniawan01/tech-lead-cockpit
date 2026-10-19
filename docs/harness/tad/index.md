@@ -103,6 +103,7 @@ Validator pada [`src/lib/tad/validator.ts`](file:///Users/ridwan/mine/tech-lead-
 2. **Sinkronisasi Scope ↔ Detail Task**:
    - Setiap entri task yang terdaftar di tabel **Development Scope** WAJIB memiliki section **Detail Task** yang bersesuaian.
    - Tidak boleh ada Detail Task tanpa entri di Development Scope (*orphan task*).
+   - **Pembacaan tabel** (`parseScopeTasks` di [`src/lib/tad/task-links.ts`](../../../src/lib/tad/task-links.ts)) hanya mengambil tabel pertama di section Development Scope. Judul yang menempel di baris tabel (`| … | TBD |### Pemetaan …`, kadang ditulis AI) dipisah dulu oleh `separateGluedHeadings` ([`src/lib/markdown/glued-headings.ts`](../../../src/lib/markdown/glued-headings.ts)), sehingga tabel berikutnya (mis. pemetaan requirement) tidak ikut dihitung sebagai task. Hasil TAD dari AI juga dinormalkan dengan fungsi yang sama di `readGeneratorResult`.
 3. **Format Penamaan Task**:
    - Format: `[TYPE][SERVICE][CODENAME] - Nama Task`
    - Tipe yang valid: `BACKEND`, `MOBILE-FE`, atau `WEB-FE`.

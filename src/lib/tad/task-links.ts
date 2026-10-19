@@ -5,6 +5,7 @@
  */
 
 import type { MrDetail, MrFileChange } from '../gitlab/types';
+import { separateGluedHeadings } from '../markdown/glued-headings';
 
 export interface ScopeTask {
   no: string;
@@ -44,6 +45,8 @@ const plain = (s: string) =>
 
 /** Rows of the Development Scope table, with the Jira keys found in each row. */
 export function parseScopeTasks(markdown: string, scopePlan?: string): ScopeTask[] {
+  // A heading glued to the last row would make the next table look like more scope rows.
+  markdown = separateGluedHeadings(markdown);
   // 1. Find the Development Scope section flexibly (h1, h2, h3, optional numbering, optional suffix)
   const sectionMatch = markdown.match(/^#{1,3}\s+(?:\d+\.?\s*)?Development Scope[^\n]*\n([\s\S]*?)(?=^#{1,3}\s|(?![\s\S]))/im);
   let section = sectionMatch?.[1] ?? '';
@@ -93,7 +96,11 @@ export function parseScopeTasks(markdown: string, scopePlan?: string): ScopeTask
 
   // 3. Parse Markdown pipe table if HTML table did not yield tasks
   if (tasks.length === 0 && section.includes('|')) {
-    const lines = section.split('\n').filter((l) => l.trim().startsWith('|'));
+    // The first table only: another table in the section (e.g. a requirement mapping) is not scope.
+    const all = section.split('\n');
+    const start = all.findIndex((l) => l.trim().startsWith('|'));
+    const end = start < 0 ? -1 : all.findIndex((l, i) => i > start && !l.trim().startsWith('|'));
+    const lines = start < 0 ? [] : all.slice(start, end < 0 ? undefined : end);
     if (lines.length >= 2) {
       const header = splitRow(lines[0]).map((c) => plain(c).toLowerCase().replace(/[^a-z]/g, ''));
       const col = (...names: string[]) => header.findIndex((h) => names.some((n) => h.includes(n)));

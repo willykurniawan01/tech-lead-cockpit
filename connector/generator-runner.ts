@@ -4,6 +4,7 @@ import * as path from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { collapseEmbeddedHtml, expandEmbeddedHtml } from '../src/lib/markdown/embedded-html.ts';
+import { separateGluedHeadings } from '../src/lib/markdown/glued-headings.ts';
 import type { FigmaFetchedSet } from '../src/lib/figma/types.ts';
 import { isPdfEncrypted } from './workspace-docs.ts';
 import { readFetchedSets } from './figma.ts';
@@ -314,7 +315,8 @@ export async function readGeneratorResult(
   const read = (file: string) => fs.promises.readFile(file, 'utf-8').catch(() => undefined);
   const [rawTad, scope] = await Promise.all([read(ws.tadPath), read(ws.scopePath)]);
   // Back to the draft's single-line table form, so an untouched table doesn't count as a change.
-  const tad = rawTad === undefined ? undefined : collapseEmbeddedHtml(rawTad);
+  // A heading the AI glued to a table row gets its own line (else the next table joins the first).
+  const tad = rawTad === undefined ? undefined : separateGluedHeadings(collapseEmbeddedHtml(rawTad));
   const changed = tad !== undefined && tad.trim() !== original.tad.trim();
   const scopeChanged = scope !== undefined && scope.trim() !== (original.scope ?? '').trim() && !/^# Rencana Scope\s+Belum ada\./.test(scope.trim());
   return {

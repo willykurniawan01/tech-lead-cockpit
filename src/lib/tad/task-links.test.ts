@@ -10,6 +10,7 @@ import {
   suggestTransition,
   verdictOf,
 } from './task-links';
+import { separateGluedHeadings } from '../markdown/glued-headings';
 
 const JQL_LINK =
   'https://x.atlassian.net/jira/software/projects/MU/boards/14/backlog?jql=textfields%20~%20%22TABUNGAN-MOTION%2A%22&selectedIssue=MU-2434';
@@ -54,6 +55,29 @@ describe('TAD ↔ Jira', () => {
       ['CORE-PAYMENT', '[BACKEND][CORE-PAYMENT][TM] - QR Pay', ['MU-2500']],
       ['PORTAL', '[WEB-FE][PORTAL][TM] - Partner Category', []],
     ]);
+  });
+
+  it('does not count a table that follows a heading glued to the last scope row', () => {
+    const glued = [
+      '# Development Scope',
+      '',
+      '| No | Service Name | Task Name | Jira Task |',
+      '|---|---|---|---|',
+      '| 1 | CORE-PAYMENT | [BACKEND][CORE-PAYMENT][QRIS] - Auth Token | TBD |',
+      '| 2 | CORE-PAYMENT | [BACKEND][CORE-PAYMENT][QRIS] - Payment Credit | TBD |### Pemetaan Requirement PRD ke Task',
+      '',
+      '| Requirement PRD | Task |',
+      '|---|---|',
+      '| `ALTO_AUTH_TOKEN` | 1 |',
+      '| `ALTO_PAYMENT_CREDIT` | 2 |',
+      '',
+      '# Detail Task',
+    ].join('\n');
+    expect(parseScopeTasks(glued).map((t) => t.title)).toEqual(['[BACKEND][CORE-PAYMENT][QRIS] - Auth Token', '[BACKEND][CORE-PAYMENT][QRIS] - Payment Credit']);
+    // A second table in the section without a heading is not scope either.
+    expect(parseScopeTasks(glued.replace('|### Pemetaan Requirement PRD ke Task', '|\n')).map((t) => t.no)).toEqual(['1', '2']);
+    expect(separateGluedHeadings('| a | b |### Judul\n| c |')).toBe('| a | b |\n\n### Judul\n| c |');
+    expect(separateGluedHeadings('| kode `#` | x |')).toBe('| kode `#` | x |');
   });
 
   it('reads Detail Task specs from tadgen tables and #### sections', () => {
