@@ -7,6 +7,7 @@
   import { toasts } from '../components/toast.svelte';
   import { confirmDialog } from '../components/confirm.svelte';
   import { coder } from '../lib/coder/client';
+  import { formatWait, quotaCooldownMs } from '../lib/coder/cooldown';
   import type { CoderProfileId, CoderRun, CoderRunStatus, CoderState } from '../lib/coder/types';
   import type { MrFileChange } from '../lib/gitlab/types';
   import { checkConformance, detailTaskSpec, parseScopeTasks, type ConformanceCheck } from '../lib/tad/task-links';
@@ -61,6 +62,16 @@
     const t = setInterval(load, 3_000);
     return () => clearInterval(t);
   });
+
+  // A run that failed on the provider quota counts down instead of starting the agent again.
+  let now = $state(Date.now());
+  const anyCooldown = $derived(runs.some((r) => r.status === 'failed' && quotaCooldownMs(r, now) > 0));
+  $effect(() => {
+    if (!anyCooldown) return;
+    const t = setInterval(() => (now = Date.now()), 1_000);
+    return () => clearInterval(t);
+  });
+  const cooldownLeft = (run: CoderRun) => quotaCooldownMs(run, now);
 
   const STATUS: Record<CoderRunStatus, { label: string; tone: string }> = {
     queued: { label: 'Antre', tone: 'muted' },
@@ -368,16 +379,21 @@
         <p class="question small">{run.reply.slice(run.reply.search(/BUTUH KLARIFIKASI/i)).slice(0, 600)}</p>
       {/if}
 
+      {#if cooldownLeft(run) > 0}
+        <p class="small muted">⏳ Kuota {run.ai.provider === 'claude' ? 'Claude' : 'Antigravity'} pulih dalam {formatWait(cooldownLeft(run))}. Revisi dan lanjutkan bisa dijalankan setelah itu.</p>
+      {/if}
+
       <div class="actions">
         {#if run.status === 'failed' && run.baseSha}
           <button
             type="button"
             class="btn btn-sm btn-primary"
             onclick={() => resume(run)}
-            title="Lanjutkan pengerjaan task ini dari kondisi terakhir"
+            disabled={cooldownLeft(run) > 0}
+            title={run.resumable ? 'Lanjutkan sesi agent yang terputus saat connector berhenti' : 'Lanjutkan pengerjaan task ini dari kondisi terakhir'}
           >
             <Icon name="play" size={12} />
-            <span>Lanjutkan Task</span>
+            <span>{cooldownLeft(run) > 0 ? `Kuota pulih dalam ${formatWait(cooldownLeft(run))}` : run.resumable ? 'Lanjutkan sesi agent' : 'Lanjutkan Task'}</span>
           </button>
         {/if}
         {#if ['ready', 'pushed', 'failed', 'testing'].includes(run.status)}
@@ -418,7 +434,11 @@
           <a class="btn btn-sm" href={run.mrCreateUrl} target="_blank" rel="noreferrer"><Icon name="external" size={12} /> Halaman MR baru</a>
         {/if}
         {#if ['ready', 'pushed', 'needs-input', 'failed'].includes(run.status) && run.baseSha}
-          <button class="btn btn-sm" onclick={() => (reviseFor = reviseFor === run.id ? null : run.id)}><Icon name="edit" size={12} /> {run.status === 'needs-input' ? 'Jawab & lanjutkan' : 'Revisi'}</button>
+          {#if cooldownLeft(run) > 0}
+            <button class="btn btn-sm" disabled title="Agent baru bisa dijalankan lagi setelah kuota provider pulih"><Icon name="edit" size={12} /> Revisi · kuota pulih dalam {formatWait(cooldownLeft(run))}</button>
+          {:else}
+            <button class="btn btn-sm" onclick={() => (reviseFor = reviseFor === run.id ? null : run.id)}><Icon name="edit" size={12} /> {run.status === 'needs-input' ? 'Jawab & lanjutkan' : 'Revisi'}</button>
+          {/if}
         {/if}
         <button
           type="button"
@@ -461,8 +481,8 @@
             placeholder={`Catatan review / jawaban untuk agent, atau instruksi conflict dengan branch ${run.targetBranch}…`}
           ></textarea>
           <div class="revise-footer">
-            <button class="btn btn-primary btn-sm" onclick={() => revise(run)} disabled={!feedback.trim()}>
-              <Icon name="sparkles" size={12} /> Kirim ke agent
+            <button class="btn btn-primary btn-sm" onclick={() => revise(run)} disabled={!feedback.trim() || cooldownLeft(run) > 0}>
+              <Icon name="sparkles" size={12} /> {cooldownLeft(run) > 0 ? `Kuota pulih dalam ${formatWait(cooldownLeft(run))}` : 'Kirim ke agent'}
             </button>
           </div>
         </div>

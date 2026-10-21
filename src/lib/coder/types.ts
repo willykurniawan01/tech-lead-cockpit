@@ -91,6 +91,10 @@ export interface CoderRun {
   agentTaskId?: string;
   /** AI code review result of the agent's changes against TAD spec. */
   aiReview?: CoderAiReview;
+  /** When the provider's quota is back (ISO): set while a run waits for it or after it failed on it. */
+  quotaResetAt?: string;
+  /** The connector stopped mid-run and the agent's session can be continued (Lanjutkan Task resumes it). */
+  resumable?: boolean;
 }
 
 export interface CoderState {

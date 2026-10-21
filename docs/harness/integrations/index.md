@@ -81,7 +81,7 @@ Token dibuat di Figma → Settings → Security → Personal access tokens denga
 ### AI Inference Providers & Keychain
 | File Path | Komponen | Deskripsi & Tanggung Jawab |
 |---|---|---|
-| [`connector/ai-providers.ts`](file:///Users/ridwan/mine/tech-lead-cockpit/connector/ai-providers.ts) | AI Drivers Manager | Mendeteksi binary `claude` dan `agy` di sistem, memvalidasi versi CLI, membaca daftar model, memicu child process streaming NDJSON, dan mengelola pembatalan (*cancel*). |
+| [`connector/ai-providers.ts`](file:///Users/ridwan/mine/tech-lead-cockpit/connector/ai-providers.ts) | AI Drivers Manager | Mendeteksi binary `claude` dan `agy` di sistem, memvalidasi versi CLI, membaca daftar model, memicu child process streaming NDJSON, dan mengelola pembatalan (*cancel*). `ProviderRunOptions.onSession` dipanggil begitu session id (Claude) / conversation id (Antigravity) diketahui, sehingga coder agent bisa melanjutkan sesi setelah connector restart. |
 | [`connector/inferhub.ts`](file:///Users/ridwan/mine/tech-lead-cockpit/connector/inferhub.ts) | InferHub Driver | Menghubungkan Cockpit ke gateway InferHub (streaming model frontier seperti Claude 3.7 Sonnet, GPT-4o, DeepSeek, dsb.). |
 | [`connector/ninerouter.ts`](file:///Users/ridwan/mine/tech-lead-cockpit/connector/ninerouter.ts) | 9Router Driver | Integrasi ke model gateway 9Router dengan streaming protokol seragam. |
 | [`connector/keychain.ts`](file:///Users/ridwan/mine/tech-lead-cockpit/connector/keychain.ts) | macOS Keychain Adapter | Fungsi `readKeychain()`, `writeKeychain()`, dan `deleteKeychain()` yang membungkus CLI `/usr/bin/security`. |

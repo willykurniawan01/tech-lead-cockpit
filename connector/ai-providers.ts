@@ -349,6 +349,8 @@ export interface ProviderRunOptions {
   /** Extra MCP servers for this run (--mcp-config JSON, e.g. figwrightMcpConfig()). Claude only. */
   mcpConfig?: string;
   onEvent?: (e: ProviderEvent) => void;
+  /** CLI runs: called as soon as the session/conversation id is known, so a crash mid-run can still resume it. */
+  onSession?: (sessionId: string) => void;
 }
 
 /**
@@ -452,7 +454,10 @@ export function startProviderRun(sel: AiSelection, purpose: RunPurpose, prompt: 
       clearTimeout(firstOutput);
       const parsed = parse(line);
       parsed.events.forEach((e) => opts.onEvent?.(e));
-      if (parsed.sessionId) sessionId = parsed.sessionId;
+      if (parsed.sessionId && parsed.sessionId !== sessionId) {
+        sessionId = parsed.sessionId;
+        opts.onSession?.(sessionId);
+      }
       if (parsed.result) final = parsed.result;
     });
     child.stderr.on('data', (d) => (stderr = (stderr + d).slice(-3000)));

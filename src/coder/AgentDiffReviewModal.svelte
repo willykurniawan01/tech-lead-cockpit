@@ -5,6 +5,7 @@
   import { toasts } from '../components/toast.svelte';
   import { api } from '../lib/api-base';
   import { coder } from '../lib/coder/client';
+  import { formatWait, quotaCooldownMs } from '../lib/coder/cooldown';
   import type { CoderAiReview, CoderReviewVerdict, CoderRun } from '../lib/coder/types';
   import { DEFAULT_AI_SELECTION, type AiSelection } from '../lib/ai/types';
   import type { MrFileChange, ReviewStrictness } from '../lib/gitlab/types';
@@ -69,6 +70,16 @@
   let showReviseBox = $state(false);
   let reviseFeedback = $state('');
   let submittingRevise = $state(false);
+
+  // After a quota failure the agent can't run again until the provider's quota is back.
+  let now = $state(Date.now());
+  const cooldown = $derived(run ? quotaCooldownMs(run, now) : 0);
+  $effect(() => {
+    if (!open || !run?.quotaResetAt) return;
+    now = Date.now();
+    const t = setInterval(() => (now = Date.now()), 1_000);
+    return () => clearInterval(t);
+  });
 
   function updateAi(sel: AiSelection) {
     ai = sel;
@@ -454,11 +465,11 @@
             <button
               type="button"
               class="btn btn-primary btn-sm"
-              disabled={submittingRevise || !reviseFeedback.trim()}
+              disabled={submittingRevise || !reviseFeedback.trim() || cooldown > 0}
               onclick={handleSendRevise}
             >
               <Icon name="sparkles" size={13} />
-              <span>{submittingRevise ? 'Mengirim...' : 'Kirim ke Agent Sekarang'}</span>
+              <span>{submittingRevise ? 'Mengirim...' : cooldown > 0 ? `Kuota pulih dalam ${formatWait(cooldown)}` : 'Kirim ke Agent Sekarang'}</span>
             </button>
           </div>
         </section>

@@ -15,6 +15,7 @@ import type {
   CoderSettings,
   StartCoderRunRequest,
 } from '../src/lib/coder/types.ts';
+import { formatWait, quotaCooldownMs } from '../src/lib/coder/cooldown.ts';
 import type { ProviderOutcome, ProviderRunOptions } from './ai-providers.ts';
 import { countDiffLines } from './gitlab.ts';
 import { DATA_DIR } from './paths.ts';
@@ -45,6 +46,61 @@ const TEST_OUTPUT_TAIL = 8_000;
 const git = promisify(execFile);
 /** Raw CLI text or its explained form (see explainCliError). */
 const COMMAND_DENIED = /required the "command" permission|permission check failed for unsandboxed|mencoba menjalankan perintah terminal/i;
+
+/** Longest wait for a provider quota to reset inside a run; a longer reset fails the run with a cooldown. */
+export const MAX_QUOTA_WAIT_MS = 15 * 60_000;
+/** Extra wait after the announced reset, so the retry doesn't land a moment too early. */
+const QUOTA_WAIT_MARGIN_MS = 5_000;
+/** Backoff before each retry of a network error or a rate limit without a reset time (so at most 2 retries). */
+export const NETWORK_RETRY_DELAYS_MS = [15_000, 60_000];
+
+const QUOTA_ERROR =
+  /quota (reached|exceeded|exhausted)|usage limit|rate[ _-]?limit|too many requests|RESOURCE_EXHAUSTED|overloaded|\b(HTTP|status|code|error)\W{0,3}(429|529)\b/i;
+const NETWORK_ERROR =
+  /network (issue|error)|connection (error|reset|refused|closed)|fetch failed|socket hang up|ECONNRESET|ECONNREFUSED|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|ENETUNREACH|service unavailable|bad gateway|gateway timeout|\b(HTTP|status|code|error)\W{0,3}50[234]\b/i;
+
+/** "Resets in 3m8s" / "try again in 45s" → ms; Claude's "usage limit reached|<epoch>" → ms from `now`. */
+export function quotaResetInMs(error: string, now = Date.now()): number | undefined {
+  const rel = error.match(/(?:resets?|try again|retry)\s+(?:in|after)\s+((?:\d+\s*(?:hours?|h|minutes?|mins?|m|seconds?|secs?|s)\s*,?\s*(?:and\s+)?)+)/i);
+  if (rel) {
+    let ms = 0;
+    for (const [, n, unit] of rel[1].matchAll(/(\d+)\s*([a-z]+)/gi)) ms += Number(n) * (/^h/i.test(unit) ? 3_600_000 : /^m/i.test(unit) ? 60_000 : 1_000);
+    return ms;
+  }
+  const epoch = error.match(/limit reached\|(\d{10})\b/i);
+  return epoch ? Math.max(0, Number(epoch[1]) * 1000 - now) : undefined;
+}
+
+/**
+ * Provider errors worth retrying: a quota/rate limit or a network hiccup. Everything else (a denied
+ * command, login, timeout, bad request) is the run's real outcome and is never retried.
+ */
+export function transientFailure(error: string | undefined, now = Date.now()): { kind: 'quota'; resetInMs?: number } | { kind: 'network' } | undefined {
+  if (!error || COMMAND_DENIED.test(error)) return undefined;
+  if (QUOTA_ERROR.test(error)) return { kind: 'quota', resetInMs: quotaResetInMs(error, now) };
+  if (NETWORK_ERROR.test(error)) return { kind: 'network' };
+  return undefined;
+}
+
+/**
+ * What to do after a failed agent attempt. A quota with a known reset is waited out once (up to
+ * MAX_QUOTA_WAIT_MS); network errors and rate limits that don't say when they lift back off
+ * NETWORK_RETRY_DELAYS_MS. Undefined: give up and fail the run.
+ */
+export function nextRetry(error: string | undefined, tries: { quota: number; network: number }, now = Date.now()): { kind: 'quota' | 'network'; waitMs: number } | undefined {
+  const t = transientFailure(error, now);
+  if (!t) return undefined;
+  if (t.kind === 'quota' && t.resetInMs !== undefined) {
+    if (tries.quota >= 1 || t.resetInMs > MAX_QUOTA_WAIT_MS) return undefined;
+    return { kind: 'quota', waitMs: t.resetInMs + QUOTA_WAIT_MARGIN_MS };
+  }
+  if (tries.network >= NETWORK_RETRY_DELAYS_MS.length) return undefined;
+  return { kind: 'network', waitMs: NETWORK_RETRY_DELAYS_MS[tries.network] };
+}
+
+/** Sent when an attempt is retried inside the same CLI session. */
+export const RETRY_PROMPT =
+  'Pekerjaanmu tadi terputus karena gangguan sementara di provider AI (jaringan atau kuota). Lanjutkan dari titik terakhir: periksa file yang sudah kamu ubah, selesaikan task sesuai instruksi sebelumnya tanpa mengulang dari awal, lalu akhiri dengan ringkasan yang diminta.';
 
 export const DEFAULT_PROFILES: Record<CoderProfileId, CoderProfile> = {
   backend: {
@@ -100,6 +156,8 @@ export interface CoderDeps {
   sink?: CoderSink;
   dataDir?: string;
   now?: () => Date;
+  /** Waits between retries (tests resolve it at once). */
+  sleep?: (ms: number) => Promise<void>;
 }
 
 export interface CoderSink {
@@ -339,7 +397,8 @@ export class CoderRuns {
   private runs: CoderRun[] = [];
   private live = new Map<string, Live>();
   private settings: CoderSettings = DEFAULT_SETTINGS;
-  private profiles: Record<CoderProfileId, CoderProfile> = DEFAULT_PROFILES;
+  // A copy: updateSettings replaces entries, and the defaults are shared by every manager.
+  private profiles: Record<CoderProfileId, CoderProfile> = { ...DEFAULT_PROFILES };
   private loaded: Promise<void>;
   private pumping = false;
   private readonly dir: string;
@@ -347,10 +406,24 @@ export class CoderRuns {
   constructor(private readonly deps: CoderDeps) {
     this.dir = deps.dataDir ?? CODER_DIR;
     this.loaded = this.load();
+    void this.loaded.then(() => this.resumeInterrupted());
   }
 
   private now() {
     return (this.deps.now?.() ?? new Date()).toISOString();
+  }
+
+  private nowMs() {
+    return (this.deps.now?.() ?? new Date()).getTime();
+  }
+
+  /** Waits between retries; cancelling the run ends the wait at once. */
+  private wait(ms: number, live: Live): Promise<void> {
+    return new Promise((resolve) => {
+      live.cancel = resolve;
+      if (this.deps.sleep) void this.deps.sleep(ms).then(resolve);
+      else setTimeout(resolve, ms).unref?.();
+    });
   }
 
   private async load() {
@@ -363,21 +436,43 @@ export class CoderRuns {
       this.settings = { ...DEFAULT_SETTINGS, ...raw.settings };
       this.profiles = { backend: { ...DEFAULT_PROFILES.backend, ...raw.profiles?.backend }, frontend: { ...DEFAULT_PROFILES.frontend, ...raw.profiles?.frontend } };
       // Runs that were in flight when the connector stopped have nothing driving them anymore.
+      // One whose agent session is known can pick up where it stopped (resumeInterrupted).
       this.runs = (raw.runs ?? []).map((r) => {
         const run: CoderRun = {
           ...r,
           baseBranch: r.baseBranch || defaultBaseBranch(),
           targetBranch: r.targetBranch || r.baseBranch || defaultBaseBranch(),
         };
-        return ['preparing', 'running', 'testing'].includes(run.status)
-          ? { ...run, status: 'failed', error: 'Connector berhenti saat agent bekerja. Jalankan revisi atau mulai ulang.' }
-          : run;
+        if (!['preparing', 'running', 'testing'].includes(run.status)) return run;
+        if (run.sessionId && run.baseSha && existsSync(run.worktree)) {
+          return { ...run, status: 'failed', resumable: true, error: 'Connector berhenti saat agent bekerja. Sesi agent dilanjutkan otomatis; bila tidak, klik Lanjutkan Task.' };
+        }
+        return { ...run, status: 'failed', error: 'Connector berhenti saat agent bekerja. Jalankan revisi atau mulai ulang.' };
       });
     } catch {
       /* first start */
     }
     // Bring the shared list in line (e.g. runs marked failed after a restart).
     if (this.runs.length) await this.save();
+  }
+
+  /**
+   * Continues runs the connector stopped in the middle of, in their own agent session. A run that
+   * was waiting for a quota resumes once it is back. A failure leaves it resumable for one click.
+   */
+  private resumeInterrupted() {
+    for (const run of this.runs.filter((r) => r.resumable && r.status === 'failed')) {
+      const go = () => {
+        if (!run.resumable || run.status !== 'failed') return;
+        this.resume(run.id, undefined, { afterRestart: true }).catch((e) => {
+          this.event(run, 'error', `Gagal melanjutkan otomatis: ${(e as Error).message}`);
+          void this.save();
+        });
+      };
+      const wait = quotaCooldownMs(run, this.nowMs());
+      if (wait > 0) setTimeout(go, wait).unref?.();
+      else go();
+    }
   }
 
   private saving: Promise<void> = Promise.resolve();
@@ -564,18 +659,49 @@ export class CoderRuns {
         : undefined;
       // A run started on an API provider (before this check existed) can't code: stop with the reason.
       if (!canCode(run.ai)) throw new CoderError(NOT_A_CODER(run.ai.provider));
-      const ai = this.deps.runAi(run.ai, agentPrompt(profile, run, agentTests, feedback, tests, fileMap, conflictContext), {
-        cwd: run.worktree,
-        timeoutMs: RUN_TIMEOUT_MS,
-        readOnlyDirs: [root],
-        allowedCommands: agentTests.map(commandPrefix),
-        resumeSession: feedback && !conflictedFiles.length ? run.sessionId : undefined,
-        onEvent: (e) => this.event(run, e.kind === 'tool-error' ? 'error' : e.kind === 'tool' ? 'tool' : 'ai', e.text),
-      });
-      live.cancel = ai.cancel;
-      const outcome = await ai.done;
-      if (live.cancelled) return;
-      run.sessionId = outcome.sessionId ?? run.sessionId;
+      let prompt = agentPrompt(profile, run, agentTests, feedback, tests, fileMap, conflictContext);
+      let resumeSession = feedback && !conflictedFiles.length ? run.sessionId : undefined;
+      const tries = { quota: 0, network: 0 };
+      let outcome: ProviderOutcome;
+      for (;;) {
+        const ai = this.deps.runAi(run.ai, prompt, {
+          cwd: run.worktree,
+          timeoutMs: RUN_TIMEOUT_MS,
+          readOnlyDirs: [root],
+          allowedCommands: agentTests.map(commandPrefix),
+          resumeSession,
+          onEvent: (e) => this.event(run, e.kind === 'tool-error' ? 'error' : e.kind === 'tool' ? 'tool' : 'ai', e.text),
+          // Saved right away: if the connector stops mid-run, the session can still be resumed.
+          onSession: (sessionId) => {
+            run.sessionId = sessionId;
+            void this.save();
+          },
+        });
+        live.cancel = ai.cancel;
+        outcome = await ai.done;
+        if (live.cancelled) return;
+        run.sessionId = outcome.sessionId ?? run.sessionId;
+        const retry = nextRetry(outcome.error, tries, this.nowMs());
+        if (!retry) break;
+        tries[retry.kind]++;
+        const label = run.ai.provider === 'claude' ? 'Claude CLI' : 'Antigravity CLI';
+        if (retry.kind === 'quota') {
+          // Persisted, so a connector restart during the wait resumes only once the quota is back.
+          run.quotaResetAt = new Date(this.nowMs() + retry.waitMs).toISOString();
+          this.event(run, 'info', `Retry: kuota ${label} habis; menunggu ${formatWait(retry.waitMs)} sampai pulih, lalu melanjutkan sesi yang sama.`);
+        } else {
+          this.event(run, 'info', `Retry ${tries.network}/${NETWORK_RETRY_DELAYS_MS.length}: gangguan sementara di ${label} (${outcome.error!.slice(0, 160)}); mencoba lagi dalam ${formatWait(retry.waitMs)}.`);
+        }
+        await this.save();
+        await this.wait(retry.waitMs, live);
+        run.quotaResetAt = undefined;
+        if (live.cancelled) return;
+        // Continue the same conversation when there is one; otherwise the first prompt again.
+        if (run.sessionId) {
+          prompt = RETRY_PROMPT;
+          resumeSession = run.sessionId;
+        }
+      }
       run.reply = outcome.reply;
       if (outcome.error) {
         // A denied terminal command ends an Antigravity run, but the file edits before it still stand;
@@ -600,6 +726,9 @@ export class CoderRuns {
       if (live.cancelled) return;
       run.error = (e as Error).message.slice(0, 2_000);
       this.event(run, 'error', run.error);
+      // A quota that resets later than a run may wait: revising before then would only fail again.
+      const quota = transientFailure(run.error, this.nowMs());
+      if (quota?.kind === 'quota' && quota.resetInMs) run.quotaResetAt = new Date(this.nowMs() + quota.resetInMs).toISOString();
 
       // Auto-rescue any uncommitted changes from timeout / error so work is never lost
       try {
@@ -945,14 +1074,23 @@ export class CoderRuns {
     if (!run || !['ready', 'pushed', 'needs-input', 'failed'].includes(run.status)) throw new CoderError('Run ini tidak bisa direvisi sekarang.');
     if (!existsSync(run.worktree) || !run.baseSha) throw new CoderError('Clone run ini sudah tidak ada; mulai run baru.');
     if (!feedback.trim()) throw new CoderError('Catatan revisi kosong.');
+    this.assertQuotaBack(run);
     run.revisions++;
     run.status = 'running';
     run.error = undefined;
+    run.resumable = undefined;
     run.startedAt = this.now();
     this.event(run, 'info', `Revisi #${run.revisions} dimulai.`);
     await this.save();
     void this.execute(run, feedback, opts).finally(() => void this.pump());
     return run;
+  }
+
+  /** A run that failed on the provider quota can't run again before it resets (it would only fail again). */
+  private assertQuotaBack(run: CoderRun) {
+    const left = quotaCooldownMs(run, this.nowMs());
+    if (left > 0) throw new CoderError(`Kuota ${run.ai.provider === 'claude' ? 'Claude' : 'Antigravity'} belum pulih. Coba lagi dalam ${formatWait(left)}.`, 429);
+    run.quotaResetAt = undefined;
   }
 
   async cancel(id: string) {
@@ -1109,7 +1247,7 @@ export class CoderRuns {
    * Resumes a failed, timed out, or interrupted run without starting from scratch.
    * Keeps existing branch and worktree changes intact, and prompts agent to continue.
    */
-  async resume(id: string, customInstructions?: string): Promise<CoderRun> {
+  async resume(id: string, customInstructions?: string, opts?: { afterRestart?: boolean }): Promise<CoderRun> {
     const run = this.get(id);
     if (!run) throw new CoderError('Run tidak ditemukan.', 404);
     if (!['failed', 'needs-input', 'ready'].includes(run.status)) {
@@ -1118,6 +1256,7 @@ export class CoderRuns {
     if (!existsSync(run.worktree) || !run.baseSha) {
       throw new CoderError('Clone run ini sudah tidak ada; silakan mulai run baru.');
     }
+    this.assertQuotaBack(run);
 
     const resumePrompt = [
       '⚡ LANJUTKAN PENGERJAAN TASK:',
@@ -1135,11 +1274,19 @@ export class CoderRuns {
       .filter(Boolean)
       .join('\n');
 
+    const session = run.resumable && run.sessionId;
     run.revisions++;
     run.status = 'running';
     run.error = undefined;
+    run.resumable = undefined;
     run.startedAt = this.now();
-    this.event(run, 'info', `Melanjutkan task (resume #${run.revisions})…`);
+    this.event(
+      run,
+      'info',
+      opts?.afterRestart
+        ? `Connector hidup lagi; melanjutkan sesi agent yang terputus (resume #${run.revisions})…`
+        : `Melanjutkan task (resume #${run.revisions}${session ? ', sesi agent yang sama' : ''})…`,
+    );
     await this.save();
     void this.execute(run, resumePrompt).finally(() => void this.pump());
     return run;
