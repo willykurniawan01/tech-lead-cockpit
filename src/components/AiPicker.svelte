@@ -7,11 +7,22 @@
     value,
     onchange,
     disabled = false,
+    only,
   }: {
     value: AiSelection;
     onchange: (sel: AiSelection) => void;
     disabled?: boolean;
+    /** Providers offered (e.g. coding needs a CLI agent); all when absent. */
+    only?: readonly AiProviderId[];
   } = $props();
+
+  const FALLBACK = [
+    { id: 'claude', label: 'Claude CLI', available: true },
+    { id: 'antigravity', label: 'Antigravity CLI', available: true },
+    { id: 'inferhub', label: 'InferHub', available: true },
+    { id: '9router', label: '9Router', available: true },
+  ] as const;
+  const offered = $derived((aiProviders.list.length ? aiProviders.list : FALLBACK).filter((p) => !only || only.includes(p.id as AiProviderId)));
 
   onMount(() => {
     aiProviders.load();
@@ -44,9 +55,13 @@
 
 <div class="picker">
   <select class="input" value={value.provider} onchange={(e) => setProvider(e.currentTarget.value as AiProviderId)} {disabled} aria-label="Provider AI">
-    {#each aiProviders.list.length ? aiProviders.list : [{ id: 'claude', label: 'Claude CLI', available: true }, { id: 'antigravity', label: 'Antigravity CLI', available: true }, { id: 'inferhub', label: 'InferHub', available: true }, { id: '9router', label: '9Router', available: true }] as p (p.id)}
+    {#each offered as p (p.id)}
       <option value={p.id}>{p.label}{p.available ? '' : ' (belum siap)'}</option>
     {/each}
+    {#if only && !only.includes(value.provider)}
+      <!-- A saved choice no longer offered stays visible so the user sees what to change. -->
+      <option value={value.provider}>{aiProviders.get(value.provider)?.label ?? value.provider} (tidak bisa untuk coding)</option>
+    {/if}
   </select>
 
   {#if isCustom}

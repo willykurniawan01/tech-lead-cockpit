@@ -1,4 +1,6 @@
 <script lang="ts">
+  // Coding needs a CLI agent (see CODER_PROVIDERS in connector/coder-runs.ts).
+  const CODER_PROVIDERS = ['claude', 'antigravity'] as const;
   import Icon from '../components/Icon.svelte';
   import Modal from '../components/Modal.svelte';
   import AiPicker from '../components/AiPicker.svelte';
@@ -642,7 +644,10 @@
       {@const p = coderState.profiles[id]}
       <section class="profile">
         <h4>{p.label}</h4>
-        <AiPicker value={p.ai} onchange={(ai) => saveProfile(id, { ai })} />
+        <AiPicker value={p.ai} onchange={(ai) => saveProfile(id, { ai })} only={CODER_PROVIDERS} />
+        {#if p.ai.provider !== 'claude' && p.ai.provider !== 'antigravity'}
+          <p class="small warn-text">Provider ini tidak bisa mengerjakan coding (hanya menulis Markdown). Pilih Claude CLI atau Antigravity CLI.</p>
+        {/if}
         <textarea class="input" rows="7" value={p.instructions} onchange={(e) => saveProfile(id, { instructions: e.currentTarget.value })}></textarea>
       </section>
     {/each}
@@ -672,6 +677,10 @@
 />
 
 <style>
+  .warn-text {
+    margin: 4px 0 0;
+    color: var(--warn);
+  }
   .agents {
     display: flex;
     flex-direction: column;

@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { StartCoderRunRequest } from '../src/lib/coder/types.ts';
-import { agentPrompt, branchName, CoderRuns, commandPrefix, DEFAULT_PROFILES, detectTestCommands, newMrUrl, repoFileMap, webUrlOf, type CoderJira } from './coder-runs.ts';
+import { agentPrompt, branchName, canCode, CoderRuns, commandPrefix, DEFAULT_PROFILES, detectTestCommands, newMrUrl, NO_FAKE_CHANGES, repoFileMap, webUrlOf, type CoderJira } from './coder-runs.ts';
 
 const sh = (cwd: string, ...args: string[]) => execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
 
@@ -162,7 +162,8 @@ describe('CoderRuns', () => {
     const { runs } = manager(0, false);
     const [run] = await runs.start([req('svc-b', 'Kosong')]);
     await until(() => ['failed', 'ready'].includes(runs.get(run.id)!.status));
-    expect(runs.get(run.id)).toMatchObject({ status: 'failed', error: 'Agent selesai tanpa mengubah file apa pun.' });
+    expect(runs.get(run.id)).toMatchObject({ status: 'failed' });
+    expect(runs.get(run.id)!.error).toMatch(/^Agent selesai tanpa mengubah file apa pun\. Baca ringkasannya/);
     const state = JSON.parse(await readFile(join(tmp, 'coder', 'state.json'), 'utf8'));
     expect(state.runs[0].id).toBe(run.id);
     const reloaded = new CoderRuns({ dataDir: join(tmp, 'coder'), servicesRoot: async () => services, runAi: () => ({ cancel() {}, done: Promise.resolve({ reply: '' }) }) });
@@ -198,6 +199,26 @@ describe('CoderRuns', () => {
     expect(runs.get(run.id)).toMatchObject({ status: 'ready', test: { exitCode: 0 } });
     expect(prompts[0]).toContain('Daftar file repo');
     expect(prompts[0]).toMatch(/\ncheck\.js\npackage\.json$/);
+  });
+
+  it('refuses API providers for coding: they can only write Markdown', async () => {
+    const runs = new CoderRuns({ dataDir: join(tmp, 'coder'), servicesRoot: async () => services, runAi: () => ({ cancel() {}, done: Promise.resolve({ reply: '' }) }) });
+    await expect(runs.updateSettings({ profiles: { backend: { ai: { provider: '9router', model: 'ag/claude-sonnet-4-6' } } } })).rejects.toThrow('9Router tidak bisa dipakai untuk mengerjakan coding');
+    await expect(runs.updateSettings({ profiles: { backend: { ai: { provider: 'inferhub', model: 'x' } } } })).rejects.toThrow('InferHub tidak bisa');
+    expect(canCode({ provider: 'claude', model: '' })).toBe(true);
+    expect(canCode({ provider: 'antigravity', model: '' })).toBe(true);
+    expect(canCode({ provider: '9router', model: '' })).toBe(false);
+  });
+
+  it('says the task looks done instead of failing blindly when the agent reports it', async () => {
+    const runs = new CoderRuns({ dataDir: join(tmp, 'coder'), servicesRoot: async () => services, runAi: () => ({ cancel() {}, done: Promise.resolve({ reply: 'SUDAH TERPENUHI: endpoint ada di config/krakend.json:120' }) }) });
+    const [run] = await runs.start([req('svc-b', 'Sudah ada')]);
+    await until(() => ['failed', 'ready'].includes(runs.get(run.id)!.status));
+    expect(runs.get(run.id)!.error).toContain('agent menilai task ini sudah terpenuhi di branch base');
+    // The rule is in the first prompt and in every revision.
+    expect(agentPrompt(DEFAULT_PROFILES.backend, req('svc-a', 'T'), [])).toContain(NO_FAKE_CHANGES);
+    expect(agentPrompt(DEFAULT_PROFILES.backend, req('svc-a', 'T'), [], 'tambahkan test')).toContain(NO_FAKE_CHANGES);
+    expect(NO_FAKE_CHANGES).toContain('TAD.md');
   });
 
   it('still fails a denied run that changed nothing', async () => {
