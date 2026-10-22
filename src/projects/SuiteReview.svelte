@@ -1,6 +1,7 @@
 <script lang="ts">
   import Icon from '../components/Icon.svelte';
   import Modal from '../components/Modal.svelte';
+  import SuiteChangeDetail from './SuiteChangeDetail.svelte';
   import { confirmDialog } from '../components/confirm.svelte';
   import { toasts } from '../components/toast.svelte';
   import { qa } from '../lib/qa/client';
@@ -114,7 +115,6 @@
     }
   }
 
-  const json = (v: unknown) => (v === undefined ? '' : JSON.stringify(v, null, 2));
   const when = (iso?: string) => (iso ? new Date(iso).toLocaleString('id-ID', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }) : '');
 </script>
 
@@ -154,7 +154,7 @@
             {#if c.group}<span class="chip">{c.group}</span>{/if}
             {#if conflicts.has(c.key)}<span class="chip chip-warn">bentrok</span>{/if}
             <span class="grow"></span>
-            <button class="btn btn-sm btn-ghost" onclick={() => (expanded = toggle(expanded, c.key))}>{expanded.has(c.key) ? 'Tutup' : 'Detail'}</button>
+            <button class="btn btn-sm btn-ghost" onclick={() => (expanded = toggle(expanded, c.key))}>{expanded.has(c.key) ? 'Tutup' : 'Lihat perubahan'}</button>
             <button class="btn btn-sm btn-ghost" title="Buang perubahan ini saja" onclick={() => discard([c.key])} disabled={busy}><Icon name="undo" size={13} /></button>
           </div>
           {#if c.details.length}
@@ -163,16 +163,7 @@
             </ul>
           {/if}
           {#if expanded.has(c.key)}
-            <div class="compare">
-              <div>
-                <span class="muted small">Di Confluence</span>
-                <pre>{json(c.before) || '(belum ada)'}</pre>
-              </div>
-              <div>
-                <span class="muted small">Draft di laptop ini</span>
-                <pre>{json(c.after) || '(dihapus)'}</pre>
-              </div>
-            </div>
+            <SuiteChangeDetail change={c} />
           {/if}
         </li>
       {/each}
@@ -262,27 +253,5 @@
     padding: 0;
     font-size: 12.5px;
     color: var(--text-2);
-  }
-  .compare {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 8px;
-    margin-top: 8px;
-  }
-  .compare pre {
-    margin: 4px 0 0;
-    max-height: 320px;
-    overflow: auto;
-    font-size: 11.5px;
-    padding: 8px;
-    border-radius: var(--radius);
-    background: var(--surface-2);
-    white-space: pre-wrap;
-    word-break: break-word;
-  }
-  @media (max-width: 720px) {
-    .compare {
-      grid-template-columns: 1fr;
-    }
   }
 </style>

@@ -316,6 +316,8 @@ export interface QASuspect {
   at: string;
   /** Bug Tracing case made from it. */
   bugCaseId?: string;
+  /** Jira bug ticket made from it in QA Cockpit (shared suite). */
+  jiraKey?: string;
 }
 
 export interface QASuite {
