@@ -80,7 +80,8 @@ export interface QADataQuery {
 
 /** A query run for a flow: data setup (variable) or a data check (assertion). */
 export interface QADbQueryLog {
-  kind: 'data' | 'check';
+  /** data: fills a variable; check: a db assertion; setup: a change made before a step's request. */
+  kind: 'data' | 'check' | 'setup';
   /** Variable filled (data) or what was checked (check). */
   label: string;
   db: string;
@@ -113,6 +114,11 @@ export interface QAEnvironment {
   };
   /** Only GET requests are sent; other steps are blocked. */
   readOnly: boolean;
+  /**
+   * Test setup may change data in the databases (a step's `setup`: one UPDATE/INSERT/DELETE, WHERE
+   * required, few rows). Off by default and never on a read-only environment.
+   */
+  dbWrites?: boolean;
   /** Server of the services' databases (one login). */
   dbServer?: QADbServer;
   /** Databases per service, for real test data and data checks (read-only). */
@@ -159,6 +165,17 @@ export interface QAStep {
   extract?: Record<string, string>;
   /** Add the environment's auth (default true). False for e.g. a login step or a negative auth test. */
   useEnvAuth?: boolean;
+  /**
+   * Data changes made right before the request (e.g. move a promo's start date to now so it is
+   * active). Run only on environments with `dbWrites`; see connector/qa/db.ts executeSetup.
+   */
+  setup?: QADbSetup[];
+}
+
+/** One statement changing test data: UPDATE/INSERT/DELETE on one of the environment's databases. */
+export interface QADbSetup {
+  db: string;
+  sql: string;
 }
 
 export interface QAFlow {
@@ -318,6 +335,8 @@ export interface QAGenerateRequest {
   focus?: { stage: QAPlanStage; stages: { id: string; title: string }[]; variables: QAPlan['variables'] };
   /** Filled by the connector from that environment: schema per database (never passwords). */
   databases?: { name: string; service?: string; schema: string; error?: string }[];
+  /** The environment lets test setup change data (prompts may then write a step's `setup`). */
+  dbWrites?: boolean;
 }
 
 export type QAJobStatus = 'running' | 'done' | 'error' | 'cancelled';
@@ -360,6 +379,8 @@ export interface QAStepResult {
   curl?: string;
   /** Data checks (db assertions) run after this request. */
   dbChecks?: QADbQueryLog[];
+  /** Data changes made before the request (the step's setup). */
+  dbSetup?: QADbQueryLog[];
   error?: string;
 }
 

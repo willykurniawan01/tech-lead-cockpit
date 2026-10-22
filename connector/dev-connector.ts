@@ -1115,12 +1115,15 @@ async function handleQa(route: string, url: URL, req: IncomingMessage, res: Serv
     if (route === 'POST /qa/runs') {
       const body = await readJson<QARunRequest>(req, 256 * 1024);
       const run = await qa.startRun(body);
+      // Data changes in the databases (steps' setup) are mutations too: named in the audit entry.
+      const suite = await qa.getSuite(run.projectId).catch(() => null);
+      const setups = (suite?.flows ?? []).filter((f) => run.flows.some((r) => r.flowId === f.id)).flatMap((f) => f.steps.flatMap((s) => s.setup ?? []));
       await audit({
         ts: new Date().toISOString(),
         action: 'qa.run',
         result: 'success',
         spaceKey: run.environment.name,
-        title: `${run.projectName} (${run.flows.length} flow)`,
+        title: `${run.projectName} (${run.flows.length} flow${setups.length ? `, ${setups.length} ubah data DB: ${[...new Set(setups.map((s) => s.db))].join(', ')}` : ''})`.slice(0, 300),
         attachments: 0,
       }).catch(() => {});
       return send(res, 202, run);

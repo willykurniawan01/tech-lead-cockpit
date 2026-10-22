@@ -76,6 +76,57 @@ export async function queryReadOnly(db: QADbConnection, password: string | undef
   }
 }
 
+/**
+ * Test setup that changes data (a step's `setup`, only on environments with `dbWrites`): one
+ * UPDATE, INSERT or DELETE; UPDATE/DELETE need a WHERE; no DDL, permissions or session commands.
+ * It runs in its own transaction and is rolled back when it touches more than MAX_SETUP_ROWS rows,
+ * so a missing or loose WHERE can't rewrite a table.
+ */
+export const MAX_SETUP_ROWS = 20;
+const SETUP_FORBIDDEN = /\b(merge|drop|truncate|alter|create|grant|revoke|copy|call|do|vacuum|analyze|cluster|reindex|lock|listen|notify|refresh|comment|security|set\s+role|reset|discard|prepare|execute|deallocate)\b/i;
+
+/** Throws unless `sql` is one allowed data change. Returns it without a trailing semicolon. */
+export function assertSetupSql(sql: string): string {
+  const trimmed = String(sql ?? '').trim().replace(/;\s*$/, '');
+  if (!trimmed) throw new QaDbError('Perintah kosong.');
+  if (trimmed.length > 10_000) throw new QaDbError('Perintah terlalu panjang.');
+  const bare = skeleton(trimmed).trim();
+  if (bare.includes(';')) throw new QaDbError('Hanya satu perintah yang boleh dijalankan.');
+  const verb = bare.match(/^(update|insert|delete)\b/i)?.[1]?.toLowerCase();
+  if (!verb) throw new QaDbError('Setup data hanya boleh UPDATE, INSERT, atau DELETE.');
+  if (verb !== 'insert' && !/\bwhere\b/i.test(bare)) throw new QaDbError(`${verb.toUpperCase()} tanpa WHERE tidak diizinkan.`);
+  const bad = bare.match(SETUP_FORBIDDEN);
+  if (bad) throw new QaDbError(`Kata "${bad[0].toUpperCase()}" tidak diizinkan di setup data.`);
+  return trimmed;
+}
+
+/** Runs one data change and commits it; more than MAX_SETUP_ROWS changed rows are rolled back. */
+export async function executeSetup(db: QADbConnection, password: string | undefined, sql: string): Promise<QADbResult> {
+  const safe = assertSetupSql(sql);
+  const started = Date.now();
+  const c = client(db, password);
+  try {
+    await c.connect();
+    await c.query('BEGIN');
+    await c.query(`SET LOCAL statement_timeout = ${STATEMENT_TIMEOUT_MS}`);
+    const res = await c.query({ text: safe, rowMode: 'array' });
+    const changed = res.rowCount ?? 0;
+    if (changed > MAX_SETUP_ROWS) {
+      await c.query('ROLLBACK').catch(() => {});
+      throw new QaDbError(`mengubah ${changed} baris (maks. ${MAX_SETUP_ROWS}); dibatalkan. Persempit WHERE-nya.`);
+    }
+    await c.query('COMMIT');
+    const columns = (res.fields ?? []).map((f) => f.name);
+    const rows = ((res.rows ?? []) as unknown[][]).slice(0, MAX_SETUP_ROWS).map((r) => r.map((v) => (v === null || v === undefined ? null : v instanceof Date ? v.toISOString() : typeof v === 'object' ? JSON.stringify(v) : String(v))));
+    return { db: db.name, sql: safe, columns, rows, rowCount: changed, durationMs: Date.now() - started };
+  } catch (e) {
+    await c.query('ROLLBACK').catch(() => {});
+    throw new QaDbError(`DB "${db.name}": ${(e as Error).message}`);
+  } finally {
+    await c.end().catch(() => {});
+  }
+}
+
 /** Names of the databases on the server (to map services to them). */
 export async function listDatabases(server: QADbConnection, password: string | undefined): Promise<string[]> {
   const r = await queryReadOnly(server, password, 'SELECT datname FROM pg_database WHERE NOT datistemplate AND datallowconn ORDER BY datname', 500);

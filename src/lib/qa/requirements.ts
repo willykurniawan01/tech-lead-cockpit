@@ -56,6 +56,7 @@ export function flowVariables(flow: QAFlow): Set<string> {
   for (const s of flow.steps) {
     names([s.request.path, s.request.headers, s.request.query, s.request.body], out);
     for (const a of s.assertions) names(a.type === 'db' ? [a.sql, a.expected] : 'expected' in a ? a.expected : undefined, out);
+    for (const st of s.setup ?? []) names(st.sql, out);
   }
   for (const q of flow.dataQueries ?? []) names(q.sql, out);
   return out;

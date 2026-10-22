@@ -38,6 +38,11 @@ export interface RunContext {
   /** Read-only query on one of the environment's databases (data setup and data checks). */
   query?: (db: string, sql: string) => Promise<QADbResult>;
   /**
+   * A step's `setup` data change (UPDATE/INSERT/DELETE, committed). Only given for environments
+   * with `dbWrites`; without it a step that has setup fails instead of running on unchanged data.
+   */
+  execute?: (db: string, sql: string) => Promise<QADbResult>;
+  /**
    * Values extracted by earlier flows of the same run (the journey: create promo → approve →
    * reserve…), with the flow that produced each and the JSON type it had. Shared and updated across flows.
    */
@@ -217,6 +222,39 @@ export function checkDbAssertion(a: Extract<QAAssertion, { type: 'db' }>, r: QAD
   return { assertion: a, passed, actual: value, message: `${label} ${a.op}${a.expected !== undefined ? ` ${show(a.expected)}` : ''}: ${passed ? 'OK' : `aktual ${show(value)}`}` };
 }
 
+/**
+ * A step's data changes before its request, in order; stops at the first that fails. Values go
+ * into the SQL with single quotes doubled, so a value from a response can't end a string literal.
+ */
+async function runSetup(ctx: RunContext, step: QAStep, vars: Record<string, string>): Promise<{ logs: QADbQueryLog[]; error?: string }> {
+  const logs: QADbQueryLog[] = [];
+  const quoted = Object.fromEntries(Object.entries(vars).map(([k, v]) => [k, v.replace(/'/g, "''")]));
+  for (const s of step.setup ?? []) {
+    const at = new Date().toISOString();
+    const missing = new Set<string>();
+    const text = interpolate(s.sql, quoted, missing);
+    const label = `setup ${s.db}`;
+    if (missing.size) {
+      const error = `Variabel belum punya nilai: ${[...missing].map((m) => `{{${m}}}`).join(', ')}`;
+      logs.push({ kind: 'setup', label, db: s.db, sql: text, at, ok: false, error });
+      return { logs, error: `Setup data gagal: ${error}` };
+    }
+    if (!ctx.execute) {
+      const error = ctx.env.readOnly ? `Environment "${ctx.env.name}" read-only: data tidak diubah.` : `Environment "${ctx.env.name}" tidak mengizinkan ubah data DB; aktifkan "Izinkan ubah data DB untuk setup test" di Environment.`;
+      logs.push({ kind: 'setup', label, db: s.db, sql: text, at, ok: false, error });
+      return { logs, error: `Setup data tidak dijalankan: ${error}` };
+    }
+    try {
+      const result = await ctx.execute(s.db, text);
+      logs.push({ kind: 'setup', label, db: s.db, sql: result.sql, at, ok: true, result, value: `${result.rowCount} baris berubah` });
+    } catch (e) {
+      logs.push({ kind: 'setup', label, db: s.db, sql: text, at, ok: false, error: (e as Error).message });
+      return { logs, error: `Setup data gagal: ${(e as Error).message}` };
+    }
+  }
+  return { logs };
+}
+
 /** Runs one query for a flow and logs it (never throws). */
 async function logQuery(ctx: RunContext, kind: QADbQueryLog['kind'], label: string, db: string, sql: string, vars: Record<string, string>): Promise<QADbQueryLog> {
   const at = new Date().toISOString();
@@ -337,6 +375,11 @@ async function runStep(step: QAStep, vars: Record<string, string>, types: Record
     return { result: { ...base, status: 'error', request, curl, error: `Variabel belum punya nilai: ${[...missing].map((m) => `{{${m}}}`).join(', ')}` }, extracted: {}, extractedTypes: {} };
   }
 
+  // Data the request needs (e.g. a promo that has already started), changed right before it.
+  const setup = step.setup?.length ? await runSetup(ctx, step, vars) : { logs: [] as QADbQueryLog[] };
+  const dbSetup = setup.logs.length ? { dbSetup: setup.logs } : {};
+  if (setup.error) return { result: { ...base, status: 'error', request, curl, error: setup.error, ...dbSetup }, extracted: {}, extractedTypes: {} };
+
   const started = Date.now();
   let res: Response;
   try {
@@ -344,7 +387,7 @@ async function runStep(step: QAStep, vars: Record<string, string>, types: Record
   } catch (e) {
     const err = e as Error;
     const why = err.name === 'TimeoutError' ? `Tidak ada respons dalam ${Math.round((ctx.env.timeoutMs || 30_000) / 1000)} detik.` : `Gagal terhubung: ${(err as { cause?: Error }).cause?.message ?? err.message}. Cek VPN dan base URL.`;
-    return { result: { ...base, status: 'error', durationMs: Date.now() - started, request, curl, error: why }, extracted: {}, extractedTypes: {} };
+    return { result: { ...base, status: 'error', durationMs: Date.now() - started, request, curl, error: why, ...dbSetup }, extracted: {}, extractedTypes: {} };
   }
   const text = await res.text().catch(() => '');
   const durationMs = Date.now() - started;
@@ -394,6 +437,7 @@ async function runStep(step: QAStep, vars: Record<string, string>, types: Record
       extracted: Object.fromEntries(Object.entries(values).map(([k, v]) => [k, isTokenName(k) ? MASK : v])),
       curl,
       ...(dbChecks.length ? { dbChecks } : {}),
+      ...dbSetup,
     },
     extracted: values,
     extractedTypes,

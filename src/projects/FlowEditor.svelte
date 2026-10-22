@@ -44,6 +44,8 @@
     extract: string;
     extras: Extra[];
     useEnvAuth: boolean;
+    /** Data changes before the request, one per line: `db: UPDATE …`. */
+    setup: string;
     curl: string;
     curlOpen: boolean;
   }
@@ -98,6 +100,7 @@
       extract: lines(s.extract, ' ← '),
       extras,
       useEnvAuth: s.useEnvAuth !== false,
+      setup: (s.setup ?? []).map((x) => `${x.db}: ${x.sql.replace(/\s*\n\s*/g, ' ')}`).join('\n'),
       curl: '',
       curlOpen: false,
     };
@@ -156,6 +159,15 @@
           else if (x.type === 'db' && x.sql.trim()) assertions.push({ type: 'db', db: x.db, sql: x.sql.trim(), op: x.op, ...(x.column.trim() ? { column: x.column.trim() } : {}), expected: parseValue(x.expected) });
         }
         const extract = Object.fromEntries(Object.entries(record(s.extract, '←', `${where} ambil nilai`)).map(([k, v]) => [k.replace(/^\{\{|\}\}$/g, ''), v]));
+        const setup = s.setup
+          .split('\n')
+          .map((l) => l.trim())
+          .filter(Boolean)
+          .map((l, n) => {
+            const at = l.indexOf(':');
+            if (at <= 0 || !l.slice(at + 1).trim()) throw new Error(`${where} ubah data DB baris ${n + 1}: format "nama_db: UPDATE …".`);
+            return { db: l.slice(0, at).trim(), sql: l.slice(at + 1).trim() };
+          });
         return {
           id: s.id,
           name: s.name.trim() || `Step ${i + 1}`,
@@ -164,6 +176,7 @@
           assertions,
           extract,
           ...(s.useEnvAuth ? {} : { useEnvAuth: false }),
+          ...(setup.length ? { setup } : {}),
         };
       }),
     };
@@ -378,6 +391,10 @@
               <label class="field"><span>Status yang diharapkan</span><input class="input mono" bind:value={s.status} placeholder="200 atau 200, 201" /></label>
               <label class="field"><span>Ambil nilai dari response <em class="muted">(<code>nama ← $.data.id</code>)</em></span><textarea class="input mono" rows="2" bind:value={s.extract} placeholder="reservationId ← $.data.id"></textarea></label>
             </div>
+            <label class="field">
+              <span>Ubah data DB sebelum request <em class="muted">(opsional, satu per baris: <code>nama_db: UPDATE …</code>; hanya jalan bila environment mengizinkan ubah data DB, UPDATE/DELETE wajib WHERE)</em></span>
+              <textarea class="input mono" rows="2" bind:value={s.setup} placeholder={"CORE-PROMO-ULTIMATE: UPDATE promo SET start_date = now() - interval '1 minute' WHERE uuid = '{{promoUuid}}'"}></textarea>
+            </label>
 
             <div class="box">
               <div class="box-head">

@@ -885,11 +885,15 @@
     }
     const count = flowIds?.length ?? enabledFlows.length;
     if (!count) return toasts.show('Centang minimal satu flow.', 'err');
-    const writes = (suite?.flows ?? []).filter((f) => (flowIds ? flowIds.includes(f.id) : f.enabled)).some((f) => f.steps.some((s) => s.request.method !== 'GET'));
-    if (writes && !env.readOnly) {
+    const picked = (suite?.flows ?? []).filter((f) => (flowIds ? flowIds.includes(f.id) : f.enabled));
+    const writes = picked.some((f) => f.steps.some((s) => s.request.method !== 'GET'));
+    // Steps that change data straight in a database (setup) are named before anything runs.
+    const setups = picked.flatMap((f) => f.steps.flatMap((s) => s.setup ?? []));
+    if ((writes || setups.length) && !env.readOnly) {
+      const dbs = [...new Set(setups.map((s) => s.db))].join(', ');
       const ok = await confirmDialog({
         title: 'Jalankan E2E?',
-        message: `${count} flow akan mengirim request (termasuk POST/PUT/PATCH/DELETE) ke "${env.name}". Data di server tersebut bisa berubah.`,
+        message: `${count} flow akan mengirim request (termasuk POST/PUT/PATCH/DELETE) ke "${env.name}". Data di server tersebut bisa berubah.${setups.length ? env.dbWrites ? ` ${setups.length} step juga mengubah data langsung di database (${dbs}) sebelum request-nya.` : ` ${setups.length} step punya ubah data DB, tapi environment ini tidak mengizinkannya: step itu akan gagal.` : ''}`,
         confirmText: 'Ya, jalankan',
       });
       if (!ok) return;
@@ -1307,6 +1311,9 @@
                 <ol class="steps">
                   {#each flow.steps as step (step.id)}
                     <li>
+                      {#each step.setup ?? [] as st, si (si)}
+                        <div class="setup-line small" title="Dijalankan langsung di database sebelum request step ini{env?.dbWrites ? '' : ' (environment ini belum mengizinkan)'}"><Icon name="alert" size={11} /> Ubah data DB <strong>{st.db}</strong>: <code class="sql">{st.sql}</code></div>
+                      {/each}
                       <div class="step-line">
                         <span class="method m-{step.request.method.toLowerCase()}">{step.request.method}</span>
                         <span class="mono path">{step.request.path}</span>
@@ -1404,6 +1411,9 @@
                     {#if s.response}<span class="mono small">HTTP {s.response.status}</span>{/if}
                     {#if s.durationMs !== undefined}<span class="muted small">{s.durationMs} ms</span>{/if}
                   </button>
+                  {#each s.dbSetup ?? [] as d, di (di)}
+                    <p class="setup-line small" class:err={!d.ok}><Icon name={d.ok ? 'check' : 'x'} size={11} /> Ubah data DB <strong>{d.db}</strong>: {d.ok ? d.value : d.error} · <code class="sql">{d.sql}</code></p>
+                  {/each}
                   {#if s.error}<p class="err small">{s.error}</p>{/if}
                   {#each s.assertions.filter((a) => !a.passed) as a, i (i)}
                     <p class="err small">✗ {a.message}</p>
@@ -1991,6 +2001,19 @@
   .order-btn {
     padding-left: 6px;
     padding-right: 6px;
+  }
+  /* A step's data change in the database (setup), before its request. */
+  .setup-line {
+    display: flex;
+    align-items: baseline;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin: 2px 0;
+    color: var(--warn, #b45309);
+  }
+  .setup-line .sql {
+    color: var(--text);
+    word-break: break-all;
   }
   .data-queries {
     display: flex;

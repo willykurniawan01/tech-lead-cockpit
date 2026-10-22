@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { extractJson } from '../ai-json.ts';
-import { assertReadOnlySql } from './db.ts';
+import { assertReadOnlySql, assertSetupSql } from './db.ts';
 import {
   QA_CATEGORIES,
   QA_CATEGORY_LABELS,
@@ -129,19 +129,34 @@ function codebaseSection(c: NonNullable<QAGenerateRequest['codebase']>): string 
   ].join('\n');
 }
 
-export function databaseSection(dbs: NonNullable<QAGenerateRequest['databases']>): string {
+/** Rules for a step's `setup` (data changes), given only when the environment allows them. */
+export const DB_SETUP_RULES = [
+  '',
+  '## Ubah data untuk setup test (environment ini mengizinkan)',
+  '- Bila skenario butuh kondisi data yang tidak bisa dibuat lewat API (mis. promo yang tanggal mulainya sudah lewat, kuota habis, status kedaluwarsa), tambahkan "setup" di step yang membutuhkannya: dijalankan TEPAT SEBELUM request step itu.',
+  '- Format: "setup": [{ "db": "nama database", "sql": "UPDATE promo SET start_date = now() - interval \'1 minute\' WHERE uuid = \'{{promoUuid}}\'" }]',
+  '- Hanya satu UPDATE/INSERT/DELETE per item; UPDATE/DELETE WAJIB punya WHERE yang menyasar data milik test ini (pakai id/uuid hasil extract), maksimal 20 baris berubah. Tanpa DDL.',
+  '- Jangan pakai "setup" untuk hal yang bisa dibuat lewat API, dan jangan mengubah data di luar yang dibuat test.',
+].join('\n');
+
+export function databaseSection(dbs: NonNullable<QAGenerateRequest['databases']>, dbWrites = false): string {
   if (!dbs.length) return '';
   return [
     '',
-    '## Database (HANYA BACA)',
+    dbWrites ? '## Database' : '## Database (HANYA BACA)',
     'Kamu bisa memakai data nyata dari database berikut agar variabel uji valid:',
     '- "dataQueries" di flow: query SELECT yang mengisi variabel {{name}} SEBELUM request pertama (baris pertama, kolom "column" atau kolom pertama). Pakai untuk id/nomor/kode yang harus ada di database (mis. promo aktif, merchant terdaftar, user dengan saldo cukup). Tulis kondisi yang memastikan datanya cocok untuk skenario, dan selalu LIMIT 1.',
     '- Assertion "db" di step: query SELECT SETELAH request untuk memeriksa data tersimpan/berubah benar (op: equals/exists/not_exists/contains/gt/lt; "column" = kolom yang dibandingkan). Boleh memakai {{variabel}} hasil extract.',
-    '- WAJIB hanya SELECT. DILARANG INSERT/UPDATE/DELETE/DDL; query lain ditolak dan transaksi dijalankan read-only.',
+    dbWrites
+      ? '- "dataQueries" dan assertion "db" WAJIB hanya SELECT (dijalankan read-only). Perubahan data hanya lewat "setup" di step (aturannya di bawah).'
+      : '- WAJIB hanya SELECT. DILARANG INSERT/UPDATE/DELETE/DDL; query lain ditolak dan transaksi dijalankan read-only.',
     '- Pakai nama tabel & kolom PERSIS dari skema di bawah; "db" diisi nama database (bukan nama host).',
     '- Tiap service punya database sendiri: query data milik service X ke database service X ("db" = nama database di bawah).',
+    dbWrites ? DB_SETUP_RULES : '',
     ...dbs.map((d) => `\n### Database "${d.name}"${d.service && d.service !== d.name ? ` (service ${d.service})` : ''}${d.error ? ` (skema tidak terbaca: ${d.error})` : ''}\n${d.schema || '(skema tidak tersedia)'}`),
-  ].join('\n');
+  ]
+    .filter((l, i) => l !== '' || i === 0)
+    .join('\n');
 }
 
 export function buildQaPrompt(req: QAGenerateRequest): string {
@@ -185,7 +200,7 @@ export function buildQaPrompt(req: QAGenerateRequest): string {
     req.databases?.length ? `\n${DB_SCHEMA_EXAMPLE}` : '',
     req.codebase ? codebaseSection(req.codebase) : '',
     req.focus ? focusSection(req.focus) : '',
-    databaseSection(req.databases ?? []),
+    databaseSection(req.databases ?? [], req.dbWrites),
     existing,
     '',
     '## Detail Task',
@@ -262,6 +277,23 @@ function normalizeDataQueries(raw: unknown): QADataQuery[] {
   return out;
 }
 
+/** A step's data changes: statements that pass the setup check (UPDATE/INSERT/DELETE, WHERE), at most 5. */
+function normalizeSetup(raw: unknown): QAStep['setup'] {
+  const out: NonNullable<QAStep['setup']> = [];
+  for (const item of Array.isArray(raw) ? raw.slice(0, 5) : []) {
+    const q = (item ?? {}) as Record<string, unknown>;
+    const db = str(q.db, 60);
+    let sql: string | undefined;
+    try {
+      sql = assertSetupSql(str(q.sql, 10_000));
+    } catch {
+      sql = undefined;
+    }
+    if (db && sql) out.push({ db, sql });
+  }
+  return out.length ? out : undefined;
+}
+
 function normalizeStep(raw: unknown, i: number): QAStep | undefined {
   if (!raw || typeof raw !== 'object') return undefined;
   const s = raw as Record<string, unknown>;
@@ -295,6 +327,7 @@ function normalizeStep(raw: unknown, i: number): QAStep | undefined {
     assertions,
     extract: strRecord(s.extract ?? s.extractVariables, 20),
     useEnvAuth: s.useEnvAuth === false ? false : undefined,
+    ...(normalizeSetup(s.setup) ? { setup: normalizeSetup(s.setup) } : {}),
   };
 }
 

@@ -4,7 +4,7 @@ import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { AiSelection } from '../../src/lib/ai/types.ts';
 import type { QAAgentJob, QADatabase, QADbConnection, QADbResult, QADbServer, QAEnvironment, QAPipeline, QAPlan, QASuspect, QAFlow, QAFlowResult, QAGenerateJob, QAGenerateRequest, QARun, QARunRequest, QASuite } from '../../src/lib/qa/types.ts';
-import { listDatabases, QaDbError, queryReadOnly, schemaSummary, testConnection } from './db.ts';
+import { executeSetup, listDatabases, QaDbError, queryReadOnly, schemaSummary, testConnection } from './db.ts';
 import { matchDatabases } from '../../src/lib/qa/db-match.ts';
 import { buildQaPrompt, dedupeStepIds, parseQaReply, QA_SYSTEM_PROMPT } from './generator.ts';
 import { arrangeFlows, groupOrder } from '../../src/lib/qa/groups.ts';
@@ -51,16 +51,17 @@ export interface QaDeps {
   watchRepos?: (root: string) => Promise<() => Promise<string[]>>;
   /** Mirrors a pipeline agent into Agent Tasks; returns the task id it is listed under. */
   agentSink?: (job: QAAgentJob, projectName: string) => Promise<string | undefined>;
-  /** Read-only database access (PostgreSQL); tests inject a fake. */
+  /** Database access (PostgreSQL): read-only queries, and `execute` for test setup; tests inject a fake. */
   db?: {
     query: (db: QADbConnection, password: string | undefined, sql: string) => Promise<QADbResult>;
     schema: (db: QADbConnection, password: string | undefined) => Promise<string>;
     test: (db: QADbConnection, password: string | undefined) => Promise<string>;
     list: (server: QADbConnection, password: string | undefined) => Promise<string[]>;
+    execute?: (db: QADbConnection, password: string | undefined, sql: string) => Promise<QADbResult>;
   };
 }
 
-const REAL_DB = { query: queryReadOnly, schema: schemaSummary, test: testConnection, list: listDatabases };
+const REAL_DB = { query: queryReadOnly, schema: schemaSummary, test: testConnection, list: listDatabases, execute: executeSetup };
 const DB_NAME = /^[A-Za-z][\w.-]{0,79}$/;
 const MAX_DATABASES = 80;
 /** Databases whose schema the AI reads in one generation (the selected tasks' services). */
@@ -144,6 +145,8 @@ export function validateEnvironment(raw: Partial<QAEnvironment>): QAEnvironment 
     variables: cleanRecord(raw.variables, 'Variabel'),
     auth: { type: authType, ...(authType === 'header' ? { headerName } : {}), ...(authType === 'basic' ? { username: String(raw.auth?.username ?? '').trim() } : {}) },
     readOnly: raw.readOnly === true,
+    // Test setup may change data only when asked for, and never on a read-only environment.
+    ...(raw.dbWrites === true && raw.readOnly !== true ? { dbWrites: true } : {}),
     dbServer: cleanServer(raw.dbServer),
     databases: cleanDatabases(raw.databases),
     timeoutMs: Number.isFinite(timeoutMs) ? Math.min(Math.max(timeoutMs, 1_000), 300_000) : 30_000,
@@ -316,6 +319,21 @@ export class QaManager {
     };
   }
 
+  /**
+   * A step's setup data change, only for environments that allow it (`dbWrites`, not read-only).
+   * Undefined otherwise: the runner then refuses the step instead of running on unchanged data.
+   */
+  private dbExecute(env: QAEnvironment): ((name: string, sql: string) => Promise<QADbResult>) | undefined {
+    if (!env.dbWrites || env.readOnly || !env.databases?.length) return undefined;
+    const execute = (this.deps.db ?? REAL_DB).execute;
+    if (!execute) return undefined;
+    return async (name, sql) => {
+      const db = this.findDb(env, name);
+      if (!db) throw new QaDbError(`Database "${name}" tidak ada di environment ${env.name}.`);
+      return execute(this.connection(env, db), await this.password(env, db), sql);
+    };
+  }
+
   private async savedEnv(envId: string): Promise<QAEnvironment> {
     const env = (await this.read<QAEnvironment[]>(this.envFile()))?.find((e) => e.id === envId);
     if (!env) throw new QaInputError('Environment tidak ditemukan; simpan dulu.');
@@ -439,6 +457,8 @@ export class QaManager {
             }
           }),
         );
+        // Agents may then write a step's `setup` (data changes for the scenario).
+        if (env.dbWrites && !env.readOnly) req.dbWrites = true;
       }
     }
     // The codebase (read-only): routes, payloads and responses are checked against the code.
@@ -814,7 +834,7 @@ export class QaManager {
           const services = [...new Set(flow.steps.map((st) => st.service).filter((x): x is string => Boolean(x)))];
           // Same environment as the failed run: its databases let the repair use real test data.
           const { req: ctx, codebase } = await this.prepareContext({ ...(plan?.request ?? { projectId, projectName: suite.projectName, categories: [] }), ai, tasks: services.map((sv) => ({ title: '', service: sv, spec: '' })), environmentId: run.environment.id }, (t) => (job.progress = t));
-          const reply = await this.runAgent(job, suite.projectName, ai, buildRepairPrompt(flow, result, codebase, ctx.databases), REPAIR_SYSTEM_PROMPT, codebase ? [codebase.root] : []);
+          const reply = await this.runAgent(job, suite.projectName, ai, buildRepairPrompt(flow, result, codebase, ctx.databases, ctx.dbWrites), REPAIR_SYSTEM_PROMPT, codebase ? [codebase.root] : []);
           let verdict: ReturnType<typeof parseRepair>;
           try {
             verdict = parseRepair(reply, flow);
@@ -898,7 +918,7 @@ export class QaManager {
           const services = [...new Set(batch.flatMap((f) => f.steps.map((st) => st.service).filter((x): x is string => Boolean(x))))];
           // The environment's databases of these services: the agent can swap sample values for real data.
           const { req: ctx, codebase } = await this.prepareContext({ ...(plan?.request ?? { projectId, projectName: suite.projectName, categories: [] }), ai, tasks: services.map((sv) => ({ title: '', service: sv, spec: '' })), environmentId: opts.environmentId }, (t) => (job.progress = t));
-          const reply = await this.runAgent(job, suite.projectName, ai, buildFixPrompt(batch, instruction, results, codebase, ctx.databases), FIX_SYSTEM_PROMPT, codebase ? [codebase.root] : []);
+          const reply = await this.runAgent(job, suite.projectName, ai, buildFixPrompt(batch, instruction, results, codebase, ctx.databases, ctx.dbWrites), FIX_SYSTEM_PROMPT, codebase ? [codebase.root] : []);
           let fix: ReturnType<typeof parseFix>;
           try {
             fix = parseFix(reply, batch);
@@ -1000,6 +1020,7 @@ export class QaManager {
           secretVariables,
           fetch: this.deps.fetch,
           query: env.databases?.length ? this.dbQuery(env) : undefined,
+          execute: this.dbExecute(env),
           carried,
           declared,
           cancelled: () => state.cancelled,

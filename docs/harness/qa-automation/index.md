@@ -161,6 +161,26 @@ Tombol **Perbaiki dengan AI** di daftar skenario (atau ikon ✨ per flow) membuk
 
 ---
 
+## 🛠️ Ubah data DB untuk setup test (`step.setup`)
+
+Ada kondisi yang tidak bisa dibuat lewat API, misalnya promo yang tanggal mulainya sudah lewat, kuota yang habis, atau status yang kedaluwarsa. Untuk itu sebuah step boleh punya `setup`: daftar `{ db, sql }` yang dijalankan **tepat sebelum request step itu**.
+
+- **Izin per environment.** Kolom `QAEnvironment.dbWrites` ("Izinkan ubah data DB untuk setup test" di modal Environment). Default mati. `validateEnvironment` membuangnya bila environment Read-only. Tanpa izin, step yang punya setup **gagal dengan pesan jelas** dan tidak mengirim request, supaya tidak berjalan di atas data yang tidak siap.
+- **Pengaman SQL** (`assertSetupSql`/`executeSetup` di [`connector/qa/db.ts`](../../../connector/qa/db.ts)):
+  - Hanya satu perintah, berupa `UPDATE`/`INSERT`/`DELETE`. `UPDATE`/`DELETE` wajib punya `WHERE`.
+  - Ditolak: DDL, izin (GRANT/REVOKE), perintah sesi, dan perintah ganda.
+  - Dijalankan di transaksi sendiri lalu di-commit. Bila baris yang berubah lebih dari `MAX_SETUP_ROWS` (20), transaksinya di-rollback.
+  - Nilai variabel dimasukkan ke SQL dengan kutip tunggal digandakan (`runSetup` di runner), sehingga nilai dari response tidak bisa menutup string literal.
+  - `dataQueries` dan assertion `db` tetap read-only.
+- **Jejak.**
+  - Hasil run menyimpan `step.dbSetup` (SQL dan jumlah baris yang berubah), yang tampil di tab Hasil Run.
+  - Dialog konfirmasi run menyebut jumlah step yang mengubah data dan database-nya.
+  - Entri audit `qa.run` mencatat "n ubah data DB: <db>".
+  - Kartu flow menampilkan baris "Ubah data DB …" di atas step-nya.
+- **Edit dan AI.**
+  - FlowEditor punya isian "Ubah data DB sebelum request" (`nama_db: UPDATE …`, satu per baris). `normalizeEditedFlow` membuang pernyataan yang tidak lolos pengaman.
+  - Prompt penulis, perbaikan, dan repair memuat `DB_SETUP_RULES` hanya bila environment-nya `dbWrites` (`prepareContext` mengisi `req.dbWrites`). AI diminta memakai setup hanya untuk kondisi yang tidak bisa dibuat lewat API, dengan WHERE yang menyasar data milik test.
+
 ## ✅ Semua test case siap dijalankan (isi otomatis dari database)
 
 Di atas panel "Yang perlu diatur", banner menunjukkan berapa test case dari **seluruh suite** yang belum siap dijalankan. Hitungannya memakai `notReady`/`dbFillPlan` ([`src/lib/qa/db-fill.ts`](../../../src/lib/qa/db-fill.ts)) di atas `e2eRequirements`: variabel yang kosong atau masih contoh AI. Nilai di environment, hasil `extract`, dan query DB dihitung sebagai siap.

@@ -4,12 +4,81 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { QADbResult, QAEnvironment, QAFlow } from '../../src/lib/qa/types.ts';
-import { assertReadOnlySql, firstValue } from './db.ts';
-import { buildQaPrompt, parseQaReply } from './generator.ts';
-import { QaManager } from './manager.ts';
+import { assertReadOnlySql, assertSetupSql, firstValue } from './db.ts';
+import { buildQaPrompt, databaseSection, normalizeEditedFlow, parseQaReply } from './generator.ts';
+import { QaManager, validateEnvironment } from './manager.ts';
 import { checkDbAssertion, runFlow } from './runner.ts';
 
 const result = (columns: string[], rows: (string | null)[][]): QADbResult => ({ db: 'promo', sql: 'SELECT 1', columns, rows, rowCount: rows.length, durationMs: 3 });
+
+describe('test setup that changes data', () => {
+  it('accepts one UPDATE/INSERT/DELETE, with WHERE where it matters', () => {
+    expect(assertSetupSql("UPDATE promo SET start_date = now() - interval '1 minute' WHERE uuid = 'p-1';")).toBe("UPDATE promo SET start_date = now() - interval '1 minute' WHERE uuid = 'p-1'");
+    expect(assertSetupSql("INSERT INTO promo_quota (promo_id, used) VALUES ('p-1', 10)")).toContain('INSERT');
+    expect(assertSetupSql("DELETE FROM promo_reservation WHERE promo_id = 'p-1'")).toContain('DELETE');
+    // Keywords inside strings are data.
+    expect(assertSetupSql("UPDATE promo SET note = 'drop; truncate' WHERE uuid = 'p-1'")).toContain('note');
+  });
+
+  it('refuses whole-table changes, several statements, DDL and permissions', () => {
+    for (const sql of [
+      "UPDATE promo SET status = 'ACTIVE'",
+      'DELETE FROM promo',
+      "UPDATE promo SET status = 'x' WHERE id = 1; DELETE FROM promo WHERE id = 2",
+      'DROP TABLE promo',
+      'TRUNCATE promo',
+      'ALTER TABLE promo ADD COLUMN x int',
+      'GRANT ALL ON promo TO public',
+      'SELECT 1',
+      "WITH d AS (DELETE FROM promo WHERE id = 1 RETURNING id) SELECT * FROM d",
+      '',
+    ]) {
+      expect(() => assertSetupSql(sql), sql).toThrow();
+    }
+  });
+
+  it("runs a step's setup right before its request, with quoted values, only where allowed", async () => {
+    const env: QAEnvironment = { id: 'dev', name: 'Dev', baseUrl: 'http://api.dev', services: {}, headers: {}, variables: { promoUuid: "p-1' OR '1'='1" }, auth: { type: 'none' }, readOnly: false, timeoutMs: 5_000 };
+    const order: string[] = [];
+    const flow = {
+      id: 'f',
+      name: 'Resume',
+      description: '',
+      category: 'happy-path',
+      taskTitles: [],
+      variables: {},
+      enabled: true,
+      steps: [{ id: 's', name: 'Artikel ACTIVE', request: { method: 'GET', path: '/promo/{{promoUuid}}' }, assertions: [{ type: 'status', op: 'equals', expected: 200 }], setup: [{ db: 'promo', sql: "UPDATE promo SET start_date = now() WHERE uuid = '{{promoUuid}}'" }] }],
+    } as QAFlow;
+    const fetch = (async () => (order.push('request'), new Response('{}', { status: 200 }))) as unknown as typeof globalThis.fetch;
+    const execute = async (db: string, sql: string) => (order.push(`setup ${db}: ${sql}`), { db, sql, columns: [], rows: [], rowCount: 1, durationMs: 1 });
+    const ok = await runFlow(flow, 0, { env, fetch, execute });
+    expect(ok.status).toBe('passed');
+    // The value's quote is doubled: it stays inside the string literal.
+    expect(order).toEqual(["setup promo: UPDATE promo SET start_date = now() WHERE uuid = 'p-1'' OR ''1''=''1'", 'request']);
+    expect(ok.steps[0].dbSetup?.[0]).toMatchObject({ kind: 'setup', ok: true, value: '1 baris berubah' });
+    // Not allowed on this environment: the step fails and sends nothing.
+    order.length = 0;
+    const refused = await runFlow(flow, 0, { env, fetch });
+    expect(refused.steps[0]).toMatchObject({ status: 'error' });
+    expect(refused.steps[0].error).toContain('tidak mengizinkan ubah data DB');
+    expect(order).toEqual([]);
+  });
+
+  it('keeps setup only when asked for and never on a read-only environment', () => {
+    expect(validateEnvironment({ name: 'Dev', baseUrl: 'http://dev', dbWrites: true }).dbWrites).toBe(true);
+    expect(validateEnvironment({ name: 'Prod', baseUrl: 'http://prod', dbWrites: true, readOnly: true }).dbWrites).toBeUndefined();
+    expect(validateEnvironment({ name: 'Dev', baseUrl: 'http://dev' }).dbWrites).toBeUndefined();
+    // Saved flows keep valid setup statements and drop the rest.
+    const f = normalizeEditedFlow({ id: 'f', name: 'x', steps: [{ id: 's', name: 's', request: { method: 'GET', path: '/x' }, setup: [{ db: 'promo', sql: "UPDATE promo SET a = 1 WHERE id = '{{id}}'" }, { db: 'promo', sql: 'DELETE FROM promo' }] }] });
+    expect(f.steps[0].setup).toEqual([{ db: 'promo', sql: "UPDATE promo SET a = 1 WHERE id = '{{id}}'" }]);
+    // Agents learn about setup only when the environment allows it.
+    const dbs = [{ name: 'promo', schema: 'promo(uuid text, start_date timestamptz)' }];
+    expect(databaseSection(dbs, true)).toContain('"setup"');
+    expect(databaseSection(dbs)).not.toContain('"setup"');
+    expect(databaseSection(dbs)).toContain('## Database (HANYA BACA)');
+  });
+});
 
 describe('read-only SQL guard', () => {
   it('accepts one SELECT (also WITH, comments, keywords inside strings)', () => {

@@ -222,6 +222,7 @@
           </div>
           <div class="env-tags">
             {#if env.readOnly}<span class="chip chip-ok">Read-only</span>{/if}
+            {#if env.dbWrites}<span class="chip chip-warn" title="Step test boleh mengubah data di database (setup)">Ubah data DB</span>{/if}
             {#if env.secretVariableNames?.length}<span class="chip" title={env.secretVariableNames.join(', ')}><Icon name="lock" size={11} /> {env.secretVariableNames.length} rahasia</span>{/if}
             {#if env.auth.type !== 'none'}<span class="chip {env.hasSecret ? '' : 'chip-warn'}"><Icon name="key" size={11} /> {env.auth.type}{env.hasSecret ? '' : ' (token kosong)'}</span>{/if}
           </div>
@@ -310,8 +311,14 @@
 
       <section class="dbs">
         <div class="dbs-head">
-          <strong>Database (hanya baca)</strong>
-          <span class="muted small">PostgreSQL, untuk data nyata variabel uji dan cek data setelah request. Hanya SELECT di transaksi read-only, sehingga data tidak bisa diubah atau dihapus.</span>
+          <strong>Database{editing.dbWrites && !editing.readOnly ? '' : ' (hanya baca)'}</strong>
+          <span class="muted small">PostgreSQL, untuk data nyata variabel uji dan cek data setelah request. Query data dan cek data selalu SELECT di transaksi read-only.</span>
+          <label class="check small db-writes" class:off={editing.readOnly}>
+            <input type="checkbox" bind:checked={editing.dbWrites} disabled={editing.readOnly} />
+            <span>
+              <strong>Izinkan ubah data DB untuk setup test.</strong> Step boleh menjalankan satu UPDATE/INSERT/DELETE sebelum request-nya (mis. memajukan tanggal mulai promo milik test). UPDATE/DELETE wajib pakai WHERE; lebih dari 20 baris berubah dibatalkan; tanpa DDL. Perubahan ini nyata dan terlihat oleh semua pemakai database ini. {editing.readOnly ? 'Tidak tersedia untuk environment Read-only.' : 'Pakai hanya untuk database development/test.'}
+            </span>
+          </label>
         </div>
         {#if editing.dbServer}
           <div class="db-grid">
