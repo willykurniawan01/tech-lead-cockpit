@@ -264,36 +264,64 @@
       toasts.show((e as Error).message, 'err');
     }
   }
+
+  // The project list can be hidden for a wider page; remembered on this laptop.
+  const LIST_KEY = 'projects.listHidden';
+  let listHidden = $state(readListHidden());
+  function readListHidden(): boolean {
+    try {
+      return localStorage.getItem(LIST_KEY) === '1';
+    } catch {
+      return false;
+    }
+  }
+  function setListHidden(hidden: boolean) {
+    listHidden = hidden;
+    try {
+      localStorage.setItem(LIST_KEY, hidden ? '1' : '0');
+    } catch {
+      // Not remembered; still applied.
+    }
+  }
 </script>
 
-<div class="projects">
-  <aside class="list">
-    <div class="list-head">
-      <h2>Proyek</h2>
-      <button class="btn btn-primary btn-sm" onclick={() => create()}><Icon name="plus" size={13} /> Baru</button>
-    </div>
-    <p class="muted small hint">Satu proyek bisa berisi beberapa TAD dengan satu tim. Estimasi dan E2E test dihitung per proyek.</p>
-    <button class="btn btn-sm schedule-btn" onclick={() => (scheduleOpen = true)} title="Kirim progres proyek otomatis ke WhatsApp lewat Hermes di VPS"><Icon name="clock" size={13} /> Laporan Terjadwal</button>
-    <button class="btn btn-sm schedule-btn" onclick={openRoster} title="Satu daftar anggota tim untuk semua proyek: role, akun Jira, email git, kapasitas, cuti"><Icon name="user" size={13} /> Daftar Tim</button>
-    {#if loaded && !projects.length}
-      <p class="muted small">Belum ada proyek.</p>
-    {/if}
-    {#each projects as p (p.id)}
-      <a class="item" class:active={p.id === current?.id} href="#/projects/{p.id}">
-        <span class="avatar" aria-hidden="true">{(p.id === current?.id ? current.name : p.name).trim().charAt(0).toUpperCase() || '?'}</span>
-        <span class="item-text">
-          <strong>{p.id === current?.id ? current.name : p.name}</strong>
-          <span class="muted small">{(p.id === current?.id ? current.draftIds : p.draftIds).length} TAD · {p.developers.length} developer</span>
-          {#if progressById[p.id]?.stages.total}
-            <span class="item-progress" title="Progres proyek">
-              <span class="item-bar"><span style="width: {progressById[p.id].percent}%"></span></span>
-              <span class="item-pct">{progressById[p.id].percent}%</span>
-            </span>
-          {/if}
+<div class="projects" class:list-hidden={listHidden}>
+  {#if listHidden}
+    <aside class="list collapsed" aria-label="Proyek">
+      <button class="btn btn-ghost btn-sm" onclick={() => setListHidden(false)} title="Tampilkan daftar proyek" aria-label="Tampilkan daftar proyek"><Icon name="sidebar" size={15} /></button>
+    </aside>
+  {:else}
+    <aside class="list">
+      <div class="list-head">
+        <span class="list-title">
+          <button class="btn btn-ghost btn-sm hide-list" onclick={() => setListHidden(true)} title="Sembunyikan daftar proyek agar halaman lebih lebar" aria-label="Sembunyikan daftar proyek"><Icon name="sidebar" size={14} /></button>
+          <h2>Proyek</h2>
         </span>
-      </a>
-    {/each}
-  </aside>
+        <button class="btn btn-primary btn-sm" onclick={() => create()}><Icon name="plus" size={13} /> Baru</button>
+      </div>
+      <p class="muted small hint">Satu proyek bisa berisi beberapa TAD dengan satu tim. Estimasi dan E2E test dihitung per proyek.</p>
+      <button class="btn btn-sm schedule-btn" onclick={() => (scheduleOpen = true)} title="Kirim progres proyek otomatis ke WhatsApp lewat Hermes di VPS"><Icon name="clock" size={13} /> Laporan Terjadwal</button>
+      <button class="btn btn-sm schedule-btn" onclick={openRoster} title="Satu daftar anggota tim untuk semua proyek: role, akun Jira, email git, kapasitas, cuti"><Icon name="user" size={13} /> Daftar Tim</button>
+      {#if loaded && !projects.length}
+        <p class="muted small">Belum ada proyek.</p>
+      {/if}
+      {#each projects as p (p.id)}
+        <a class="item" class:active={p.id === current?.id} href="#/projects/{p.id}">
+          <span class="avatar" aria-hidden="true">{(p.id === current?.id ? current.name : p.name).trim().charAt(0).toUpperCase() || '?'}</span>
+          <span class="item-text">
+            <strong>{p.id === current?.id ? current.name : p.name}</strong>
+            <span class="muted small">{(p.id === current?.id ? current.draftIds : p.draftIds).length} TAD · {p.developers.length} developer</span>
+            {#if progressById[p.id]?.stages.total}
+              <span class="item-progress" title="Progres proyek">
+                <span class="item-bar"><span style="width: {progressById[p.id].percent}%"></span></span>
+                <span class="item-pct">{progressById[p.id].percent}%</span>
+              </span>
+            {/if}
+          </span>
+        </a>
+      {/each}
+    </aside>
+  {/if}
 
   <section class="main" class:page-scroll={current && tab === 'e2e'}>
     {#if !loaded}
@@ -390,6 +418,22 @@
     grid-template-columns: 260px 1fr;
     height: 100%;
     overflow: hidden;
+  }
+  .projects.list-hidden {
+    grid-template-columns: 44px 1fr;
+  }
+  .list.collapsed {
+    align-items: center;
+    padding: 14px 4px;
+  }
+  .list-title {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+  }
+  .hide-list {
+    padding: 4px;
+    margin-left: -4px;
   }
   .list {
     display: flex;
@@ -683,6 +727,14 @@
   @media (max-width: 860px) {
     .projects {
       grid-template-columns: 1fr;
+    }
+    .projects.list-hidden {
+      grid-template-columns: 1fr;
+    }
+    .list.collapsed {
+      flex-direction: row;
+      max-height: none;
+      padding: 6px 12px;
     }
     .list {
       border-right: none;

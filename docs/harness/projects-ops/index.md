@@ -36,7 +36,7 @@ graph TD
 ### Frontend (`src/projects/` & `src/lib/projects/`)
 | File Path | Komponen | Deskripsi & Tanggung Jawab |
 |---|---|---|
-| [`src/projects/ProjectsView.svelte`](file:///Users/ridwan/mine/tech-lead-cockpit/src/projects/ProjectsView.svelte) | Tampilan Sentral Proyek | Container navigasi tab antara Ops Board, Kartu Progres, Estimasi Timeline, dan Pengaturan Laporan Terjadwal. |
+| [`src/projects/ProjectsView.svelte`](file:///Users/ridwan/mine/tech-lead-cockpit/src/projects/ProjectsView.svelte) | Tampilan Sentral Proyek | Container navigasi tab antara Ops Board, Kartu Progres, Estimasi Timeline, dan Pengaturan Laporan Terjadwal. Daftar proyek di kiri bisa disembunyikan lewat ikon sidebar di sebelah judul **Proyek** (tersisa strip 44px dengan tombol tampilkan) agar halaman lebih lebar; pilihan diingat per laptop (`localStorage` `projects.listHidden`). |
 | [`src/projects/OpsBoard.svelte`](file:///Users/ridwan/mine/tech-lead-cockpit/src/projects/OpsBoard.svelte) | Papan Operasional | Board bergaya Kanban/list yang mengagregasikan task dari seluruh TAD dan tiket Jira aktif. |
 | [`src/projects/ProjectProgressCard.svelte`](file:///Users/ridwan/mine/tech-lead-cockpit/src/projects/ProjectProgressCard.svelte) | Kartu Metrik Progres | Menampilkan persentase penyelesaian task, status backend/frontend, dan indikator blocker. |
 | [`src/projects/EstimatePanel.svelte`](file:///Users/ridwan/mine/tech-lead-cockpit/src/projects/EstimatePanel.svelte) | Panel Estimasi Jadwal | Antarmuka interaktif kalkulasi durasi proyek: konfigurasi kapasitas tim, rasio buffer, dan tanggal mulai/selesai. |
