@@ -175,6 +175,7 @@ describe('CoderRuns', () => {
     expect(runSource({ kind: 'e2e', projectId: 'p1', flowId: 'f1', flowName: 'Reserve', qaRunId: 'r1', extra: 1 })).toEqual({ kind: 'e2e', projectId: 'p1', flowId: 'f1', flowName: 'Reserve', qaRunId: 'r1' });
     expect(runSource({ kind: 'other', projectId: 'p1', flowId: 'f1' })).toBeUndefined();
     expect(runSource({ kind: 'e2e', projectId: 'p1' })).toBeUndefined();
+    expect(runSource({ kind: 'e2e', projectId: 'p1', flowId: 'f1', flowName: '2 test case', qaRunId: 'r1', flowIds: ['f1', 'f2', 7] })?.flowIds).toEqual(['f1', 'f2']);
     const { runs } = manager();
     const [run] = await runs.start([{ ...req('svc-a', '[BUGFIX][SVC-A][E2E] - Validasi & edge case Update promo DRAFT'), kind: 'bugfix', source: { kind: 'e2e', projectId: 'p1', flowId: 'f1', flowName: 'Reserve', qaRunId: 'r1' } }]);
     expect(run.source).toEqual({ kind: 'e2e', projectId: 'p1', flowId: 'f1', flowName: 'Reserve', qaRunId: 'r1' });

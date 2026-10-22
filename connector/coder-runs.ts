@@ -238,7 +238,8 @@ export function runSource(raw: unknown): CoderRun['source'] {
   const r = raw as Record<string, unknown> | undefined;
   if (!r || r.kind !== 'e2e') return undefined;
   const s = (v: unknown, max: number) => (typeof v === 'string' ? v.slice(0, max) : '');
-  const source = { kind: 'e2e' as const, projectId: s(r.projectId, 100), flowId: s(r.flowId, 100), flowName: s(r.flowName, 300), qaRunId: s(r.qaRunId, 120) };
+  const flowIds = Array.isArray(r.flowIds) ? r.flowIds.map((x) => s(x, 100)).filter(Boolean).slice(0, 50) : [];
+  const source = { kind: 'e2e' as const, projectId: s(r.projectId, 100), flowId: s(r.flowId, 100), flowName: s(r.flowName, 300), qaRunId: s(r.qaRunId, 120), ...(flowIds.length ? { flowIds } : {}) };
   return source.projectId && source.flowId ? source : undefined;
 }
 

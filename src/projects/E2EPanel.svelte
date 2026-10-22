@@ -13,7 +13,7 @@
   import { branchName, branchNameError, pickBaseBranch } from '../lib/coder/branches';
   import { appSettings } from '../lib/settings/store.svelte';
   import type { CoderProfileId, CoderRun, CoderRunStatus } from '../lib/coder/types';
-  import { buildCodeFixSpec, codeFixTitle, e2eDraftId, failedStep, failingService } from '../lib/qa/code-fix';
+  import { buildCodeFixSpec, buildMultiCodeFixSpec, chunkFixes, codeFixTitle, e2eDraftId, failedStep, failingService, multiCodeFixTitle } from '../lib/qa/code-fix';
   import { drafts as draftStore, draftTitle } from '../tad/drafts.svelte';
   import { startGeneratorJob } from '../tad/generator-client';
   import { finishGeneratorJob } from '../tad/job-delivery';
@@ -146,7 +146,8 @@
   const fixByFlow = $derived.by(() => {
     const m = new Map<string, CoderRun>();
     for (const r of [...coderRuns].sort((a, b) => b.createdAt.localeCompare(a.createdAt))) {
-      if (r.source?.kind === 'e2e' && r.source.projectId === project.id && !m.has(r.source.flowId)) m.set(r.source.flowId, r);
+      if (r.source?.kind !== 'e2e' || r.source.projectId !== project.id) continue;
+      for (const id of r.source.flowIds ?? [r.source.flowId]) if (!m.has(id)) m.set(id, r);
     }
     return m;
   });
@@ -343,6 +344,126 @@
     }
     draftStore.select(draftId);
     location.hash = '#/tad';
+  }
+
+  // "Perbaiki kode" for several failed test cases at once: one run per repo (a repo never has two
+  // runs at the same time), at most MAX_FLOWS_PER_FIX per run; different repos run in parallel.
+  interface RepoCfg {
+    base: string;
+    branches: string[];
+    from: 'loading' | 'remote' | 'local' | 'error';
+    branch: string;
+  }
+  let bulkOpen = $state(false);
+  let bulkPicked = $state(new Set<string>());
+  let bulkRepoOf = $state<Record<string, string>>({});
+  let bulkRepos = $state<string[]>([]);
+  let bulkCfg = $state<Record<string, RepoCfg>>({});
+  let bulkProfile = $state<CoderProfileId>('backend');
+  let bulkNote = $state('');
+  let bulkStarting = $state(false);
+  const failureOf = (flowId: string) => {
+    const res = latest.get(flowId);
+    const run = res ? runs.find((r) => r.id === res.runId) : undefined;
+    const result = run?.flows.find((f) => f.flowId === flowId);
+    return run && result ? { run, result } : undefined;
+  };
+  /** Failed test cases that have no fix running yet. */
+  const fixable = $derived((suite?.flows ?? []).filter((f) => resultBucket(latest.get(f.id)) === 'failed' && !CODER_ACTIVE.includes(fixByFlow.get(f.id)?.status ?? 'cancelled') && failureOf(f.id)));
+  /** Picked test cases by repo, in run-sized chunks. */
+  const bulkGroups = $derived.by(() => {
+    const byRepo = new Map<string, QAFlow[]>();
+    for (const f of fixable) {
+      if (!bulkPicked.has(f.id)) continue;
+      const repo = bulkRepoOf[f.id] ?? '';
+      byRepo.set(repo, [...(byRepo.get(repo) ?? []), f]);
+    }
+    return [...byRepo].map(([repo, flows]) => ({ repo, flows, chunks: chunkFixes(flows) }));
+  });
+  /** The branch for a repo's runs: what the user typed, else one named after all its test cases. */
+  const repoBranch = (g: { repo: string; flows: QAFlow[] }) => (bulkCfg[g.repo]?.branch ?? '').trim() || branchName(undefined, multiCodeFixTitle(g.flows, ''), 'fix', '');
+  const chunkBranch = (g: { repo: string; flows: QAFlow[] }, i: number) => (i === 0 ? repoBranch(g) : `${repoBranch(g)}-${i + 1}`);
+  let coderConcurrency = $state(2);
+  const bulkErrors = $derived(
+    bulkGroups.flatMap((g) => {
+      if (!g.repo) return [`${g.flows.length} test case belum punya repo.`];
+      const cfg = bulkCfg[g.repo];
+      if (!cfg || cfg.from === 'loading') return [`Branch ${g.repo} masih dimuat.`];
+      const errs: string[] = [];
+      if (cfg.branches.length && !cfg.branches.includes(cfg.base)) errs.push(`${g.repo}: pilih base branch.`);
+      const e = branchNameError(repoBranch(g));
+      if (e) errs.push(`${g.repo}: ${e}`);
+      return errs;
+    }),
+  );
+
+  async function openBulkFix() {
+    bulkPicked = new Set((searching ? fixable.filter((f) => visibleFlows.some((v) => v.id === f.id)) : fixable).map((f) => f.id));
+    bulkNote = '';
+    bulkOpen = true;
+    bulkRepos = await coder.repos().catch(() => []);
+    coderConcurrency = (await coder.state().catch(() => null))?.settings.concurrency ?? coderConcurrency;
+    bulkRepoOf = Object.fromEntries(fixable.map((f) => [f.id, suggestRepo(bulkRepos, failingService(f, failureOf(f.id)!.result)) || '']));
+  }
+  // Each repo in the selection gets its branches loaded once, and a default base and branch name.
+  $effect(() => {
+    if (!bulkOpen) return;
+    for (const g of bulkGroups) {
+      if (!g.repo || untrack(() => bulkCfg[g.repo])) continue;
+      untrack(() => {
+        bulkCfg[g.repo] = { base: '', branches: [], from: 'loading', branch: '' };
+      });
+      void coder
+        .branches(g.repo)
+        .then((r) => {
+          bulkCfg[g.repo] = { ...bulkCfg[g.repo], branches: r.branches, from: r.fromRemote ? 'remote' : 'local', base: pickBaseBranch(r.branches, [appSettings.value.workspace.defaultBaseBranch], r.head) ?? '' };
+        })
+        .catch(() => {
+          bulkCfg[g.repo] = { ...bulkCfg[g.repo], from: 'error' };
+        });
+    }
+  });
+
+  async function startBulkFix() {
+    if (bulkErrors.length || !bulkGroups.length) return;
+    bulkStarting = true;
+    try {
+      const requests = bulkGroups.flatMap((g) =>
+        g.chunks.map((flows, i) => {
+          const first = failureOf(flows[0].id)!;
+          const cfg = bulkCfg[g.repo];
+          return {
+            draftId: e2eDraftId(project.id),
+            tadTitle: `E2E: ${project.name}`,
+            taskTitle: multiCodeFixTitle(flows, g.repo),
+            profile: bulkProfile,
+            repo: g.repo,
+            ...(cfg.base ? { baseBranch: cfg.base, targetBranch: cfg.base } : {}),
+            branch: chunkBranch(g, i),
+            spec: buildMultiCodeFixSpec({
+              items: flows.map((f) => ({ flow: f, result: failureOf(f.id)!.result, runAt: new Date(failureOf(f.id)!.run.startedAt).toLocaleString('id-ID') })),
+              projectName: project.name,
+              envName: first.run.environment.name,
+              repo: g.repo,
+              taskSpecs: tasks.filter((t) => flows.some((f) => f.taskTitles.includes(t.title))).map((t) => ({ title: t.title, spec: t.spec })),
+              note: bulkNote,
+            }),
+            kind: 'bugfix' as const,
+            source: { kind: 'e2e' as const, projectId: project.id, flowId: flows[0].id, flowName: flows.length === 1 ? flows[0].name : `${flows.length} test case`, qaRunId: first.run.id, flowIds: flows.map((f) => f.id) },
+          };
+        }),
+      );
+      await coder.start(requests);
+      bulkOpen = false;
+      const repos = bulkGroups.length;
+      toasts.show(`${requests.length} perbaikan dimulai di background untuk ${repos} repo${repos > 1 ? ' (berjalan paralel sesuai batas konkurensi)' : ''}. Pantau di panel Perbaikan kode atau Agent Tasks.`, 'ok', 7000);
+      await loadCoderRuns();
+      coderKey++;
+    } catch (e) {
+      toasts.show((e as Error).message, 'err', 8000);
+    } finally {
+      bulkStarting = false;
+    }
   }
 
   function openResult(r: LatestResult) {
@@ -957,6 +1078,9 @@
           <button class="btn btn-sm" onclick={() => addFlow()}><Icon name="plus" size={13} /> Flow manual</button>
         </div>
         <div class="result-filter" role="group" aria-label="Filter hasil run terakhir">
+          {#if fixable.length}
+            <button class="btn btn-sm fix-all-btn" onclick={openBulkFix} title="Coder agent memperbaiki kode untuk beberapa test yang gagal sekaligus: satu run per repo, repo berbeda berjalan paralel"><Icon name="code" size={13} /> Perbaiki kode ({fixable.length} gagal)</button>
+          {/if}
           <span class="muted small">Hasil terakhir{env ? ` di ${env.name}` : ''}:</span>
           {#each RESULT_FILTERS as rf (rf.value)}
             <button class="chip filter-chip rf-{rf.value || 'all'}" class:active={flowResult === rf.value} onclick={() => (flowResult = rf.value)} aria-pressed={flowResult === rf.value}>
@@ -1339,6 +1463,80 @@
   {/snippet}
 </Modal>
 
+<Modal bind:open={bulkOpen} title="Perbaiki kode beberapa test yang gagal" subtitle="Satu run per repo (maks. 6 test case per run). Repo berbeda berjalan paralel di background, tanpa tiket." width={920}>
+  <div class="fix-form">
+    <div class="finding-head small">
+      <strong>{bulkPicked.size} dari {fixable.length} test gagal dipilih</strong>
+      <span class="grow"></span>
+      <button class="link-btn small" onclick={() => (bulkPicked = new Set(fixable.map((f) => f.id)))}>pilih semua</button>
+      <button class="link-btn small" onclick={() => (bulkPicked = new Set())}>kosongkan</button>
+    </div>
+    <div class="findings">
+      {#each fixable as f (f.id)}
+        {@const fr = failureOf(f.id)}
+        {@const st = fr ? failedStep(fr.result) : undefined}
+        <div class="finding">
+          <input type="checkbox" checked={bulkPicked.has(f.id)} onchange={() => (bulkPicked = toggle(bulkPicked, f.id))} aria-label="Perbaiki {f.name}" />
+          <span class="grow">
+            <span class="small"><strong>{f.name}</strong>{#if f.stage} <span class="muted">· {f.stage}</span>{/if}</span>
+            {#if st}<span class="muted small finding-detail">{st.name}{st.response ? ` · HTTP ${st.response.status}` : ''}{fr && fr.result.steps.filter((x) => x.status === 'skipped').length ? ` · ${fr.result.steps.filter((x) => x.status === 'skipped').length} step belum diuji ikut diperiksa` : ''}</span>{/if}
+          </span>
+          <select class="input bulk-repo" value={bulkRepoOf[f.id] ?? ''} onchange={(e) => (bulkRepoOf = { ...bulkRepoOf, [f.id]: e.currentTarget.value })} aria-label="Repo untuk {f.name}">
+            <option value="">Pilih repo…</option>
+            {#each bulkRepos as r (r)}<option value={r}>{r}</option>{/each}
+          </select>
+        </div>
+      {/each}
+    </div>
+    {#if bulkGroups.length}
+      <div class="bulk-groups">
+        {#each bulkGroups as g (g.repo)}
+          <div class="bulk-group">
+            <div class="small"><strong>{g.repo || 'Belum ada repo'}</strong> <span class="muted">· {g.flows.length} test case → {g.chunks.length} run</span></div>
+            {#if g.repo && bulkCfg[g.repo]}
+              <div class="fix-grid two">
+                <label class="field">
+                  <span>Base branch <em class="muted">{bulkCfg[g.repo].from === 'remote' ? '(dari GitLab)' : bulkCfg[g.repo].from === 'local' ? '(salinan lokal)' : bulkCfg[g.repo].from === 'loading' ? '(memuat…)' : ''}</em></span>
+                  {#if bulkCfg[g.repo].branches.length}
+                    <select class="input mono" bind:value={bulkCfg[g.repo].base}>
+                      {#each bulkCfg[g.repo].branches as b (b)}<option value={b}>{b}</option>{/each}
+                    </select>
+                  {:else}
+                    <input class="input mono" bind:value={bulkCfg[g.repo].base} placeholder="staging" />
+                  {/if}
+                </label>
+                <label class="field">
+                  <span>Nama branch{g.chunks.length > 1 ? ` (run berikutnya: -2, -3, …)` : ''}</span>
+                  <input class="input mono" value={repoBranch(g)} oninput={(e) => (bulkCfg[g.repo].branch = e.currentTarget.value)} maxlength="115" spellcheck="false" />
+                </label>
+              </div>
+            {/if}
+          </div>
+        {/each}
+      </div>
+    {/if}
+    <div class="fix-grid two">
+      <label class="field">
+        <span>Profil</span>
+        <select class="input" bind:value={bulkProfile}>
+          <option value="backend">Backend</option>
+          <option value="frontend">Frontend</option>
+        </select>
+      </label>
+      <label class="field">
+        <span>Catatan untuk agent <em class="muted">(opsional, untuk semua run)</em></span>
+        <input class="input" bind:value={bulkNote} placeholder="mis. ikuti format error response standar" />
+      </label>
+    </div>
+    {#if bulkErrors.length}<p class="err small">{bulkErrors.join(' ')}</p>{/if}
+    <p class="muted small">Tiap run memeriksa step yang gagal dan step sesudahnya yang belum diuji, lalu memperbaiki semuanya sekaligus (dengan test reproduksi). Test yang ternyata keliru tidak diubah kodenya; agent bertanya. {bulkGroups.reduce((n, g) => n + g.chunks.length, 0)} run masuk antrean; {coderConcurrency} berjalan bersamaan (repo berbeda; satu repo satu run sekaligus), sisanya menyusul otomatis. Batas ini diatur di pengaturan coder agent.</p>
+  </div>
+  {#snippet footer()}
+    <button class="btn btn-ghost" onclick={() => (bulkOpen = false)}>Batal</button>
+    <button class="btn btn-primary" onclick={startBulkFix} disabled={bulkStarting || !bulkGroups.length || bulkErrors.length > 0}><Icon name="play" size={13} /> {bulkStarting ? 'Memulai…' : `Jalankan ${bulkGroups.reduce((n, g) => n + g.chunks.length, 0)} run di background`}</button>
+  {/snippet}
+</Modal>
+
 <Modal bind:open={fixOpenModal} title="Perbaiki kode dari test yang gagal" subtitle={fixTarget?.flow.name} width={760}>
   {#if fixTarget}
     {@const st = failedStep(fixTarget.result)}
@@ -1649,6 +1847,30 @@
     display: grid;
     grid-template-columns: 2fr 1fr 1fr;
     gap: 10px;
+  }
+  .fix-all-btn {
+    color: var(--err);
+  }
+  .bulk-repo {
+    width: 190px;
+    padding: 3px 6px;
+    font-size: 11.5px;
+  }
+  .bulk-groups {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+  .bulk-group {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 10px;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+  }
+  .fix-grid.two {
+    grid-template-columns: 1fr 1fr;
   }
   .warn-text {
     color: var(--warn, #b45309);

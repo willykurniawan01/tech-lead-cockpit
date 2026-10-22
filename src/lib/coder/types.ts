@@ -43,6 +43,8 @@ export interface CoderRunSource {
   projectId: string;
   flowId: string;
   flowName: string;
+  /** Every test case the run fixes when started for several at once (flowId is the first). */
+  flowIds?: string[];
   /** The E2E run whose failure the fix starts from. */
   qaRunId: string;
 }
