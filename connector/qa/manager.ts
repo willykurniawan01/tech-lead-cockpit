@@ -3,7 +3,8 @@ import { mkdir, mkdtemp, readdir, readFile, rename, rm } from 'node:fs/promises'
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { AiSelection } from '../../src/lib/ai/types.ts';
-import type { QAEnvImportAction, QAEnvImportPreview, QASuiteReview } from '../../src/lib/qa/types.ts';
+import type { QAEnvImportAction, QAEnvImportPreview, QARunEvidence, QASuiteReview } from '../../src/lib/qa/types.ts';
+import { evidenceStorage, evidenceTitle } from '../../src/lib/qa/evidence.ts';
 import type { QAAgentJob, QADatabase, QADbConnection, QADbResult, QADbServer, QAEnvironment, QAPipeline, QAPlan, QAProject, QASuspect, QAFlow, QAFlowResult, QAGenerateJob, QAGenerateRequest, QARun, QARunRequest, QASuite, QATadRef } from '../../src/lib/qa/types.ts';
 import { executeSetup, listDatabases, QaDbError, queryReadOnly, schemaSummary, testConnection } from './db.ts';
 import { matchDatabases } from '../../src/lib/qa/db-match.ts';
@@ -601,6 +602,20 @@ export class QaManager {
         }
       }
     }
+  }
+
+  /** Sends a finished run to Confluence as a readable evidence page (again = update it). */
+  async publishEvidence(projectId: string, runId: string): Promise<QARunEvidence> {
+    const store = this.store;
+    if (!store.saveEvidence) throw new QaInputError('Evidence hanya bisa dikirim bila penyimpanan memakai Confluence (Workspace QA).');
+    const run = await this.getRun(this.projectId(projectId), runId);
+    if (!run) throw new QaInputError('Run tidak ditemukan.');
+    if (run.status === 'running') throw new QaInputError('Run masih berjalan; tunggu sampai selesai.');
+    const by = await this.actor();
+    const evidence = await store.saveEvidence(run, { title: evidenceTitle(run), storage: evidenceStorage(run, { by, attachment: `run-${run.id}.json` }) }, by);
+    const live = this.runs.get(run.id)?.run;
+    if (live) live.evidence = evidence;
+    return evidence;
   }
 
   // Review before sending (drafts) ------------------------------------------------------------

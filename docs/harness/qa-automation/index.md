@@ -244,6 +244,13 @@ Data E2E (proyek, suite beserta grup, rencana journey, riwayat run, dan environm
 - urutan (milik saya bila hanya saya yang mengubah urutan), daftar grup (gabungan), field suite lain.
 Hanya test case yang sama (atau field suite yang sama, mis. catatan) yang berubah di kedua sisi menjadi konflik: `QaConflictError` dengan daftar yang bentrok ("Test case "X" sudah diubah oleh Y pada Z"). Berlaku untuk semua mode (file, Confluence, PostgreSQL).
 
+### 🧾 Evidence run ke Confluence
+Tombol **Kirim evidence** di hasil run ([`EvidenceButton.svelte`](../../../src/projects/EvidenceButton.svelte), dengan konfirmasi) membuat halaman evidence yang bisa dibaca orang di bawah halaman Run proyek: `Evidence <proyek> · <waktu> · <environment> (x/y lulus)`, label `qa-evidence` dan `qa-evidence-<runId>`. Isinya ([`src/lib/qa/evidence.ts`](../../../src/lib/qa/evidence.ts), storage format, identik di TL dan QA Cockpit):
+- ringkasan (proyek, environment, mulai/selesai, jumlah lulus/gagal, pengirim, id run) dan tabel test case dengan lozenge status;
+- per test case: data uji dari DB, lalu tiap step dalam blok expand: setup DB, request (method, URL, header, body), response, tabel ekspektasi (hasil, aktual), cek data, variabel yang diambil, curl;
+- body > 6.000 karakter dipotong; halaman > ~3 MB berhenti menampilkan detail step (ada catatan); lampiran `run-<id>.json` berisi run utuh.
+Data diambil dari run apa adanya: token dan password sudah disamarkan runner. Kirim ulang memperbarui halaman yang sama (dicari lewat label). Link evidence disimpan di run (`run.evidence`), lalu tombol berubah jadi **Lihat evidence** + perbarui. Hanya untuk penyimpanan Confluence (`QaStore.saveEvidence`). Audit `qa.evidence`.
+
 ### 📦 Import / export environment
 Tombol **Export** dan **Import** di modal Environment ([`EnvTransfer.svelte`](../../../src/projects/EnvTransfer.svelte), logika [`connector/qa/env-transfer.ts`](../../../connector/qa/env-transfer.ts), keduanya identik di Tech Lead Cockpit dan QA Cockpit). Untuk memindahkan environment antar laptop, antar workspace, atau antara TL dan QA Cockpit.
 - **File** `cockpit-environment-<tanggal>.json` (format `cockpit-environments`, versi 1) ditulis connector ke `~/Downloads` (0600), karena webview desktop tidak bisa download. Isinya konfigurasi environment tanpa field status Keychain dan versi.
@@ -282,6 +289,7 @@ Dengan penyimpanan bersama, perubahan test case **tidak langsung** ke Confluence
 | `POST /qa/environments/export` | Tulis file export ke ~/Downloads (`ids`, `passphrase` opsional untuk rahasia terenkripsi), audit |
 | `POST /qa/environments/import/preview` | Isi file export dicocokkan dengan environment di sini (tanpa menyimpan) |
 | `POST /qa/environments/import` | Simpan environment dari file per tindakan (`replace`/`new`/`skip`), rahasia ke Keychain, audit |
+| `POST /qa/runs/evidence` | Buat/perbarui halaman evidence run di Confluence (`projectId`, `runId`), audit `qa.evidence` |
 
 ---
 

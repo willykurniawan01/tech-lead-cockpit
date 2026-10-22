@@ -37,6 +37,7 @@
     'qa.suite.publish': 'Kirim test case E2E',
     'qa.env.export': 'Export environment E2E',
     'qa.env.import': 'Import environment E2E',
+    'qa.evidence': 'Evidence run E2E ke Confluence',
     'qa.store.migrate': 'Pindah data E2E ke DB pusat',
     'report.install': 'Pasang laporan',
     'report.send': 'Kirim laporan',

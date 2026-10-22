@@ -1,6 +1,6 @@
 import { mkdir, readdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import type { QAEnvironment, QAPlan, QAProject, QARun, QASuite } from '../../src/lib/qa/types.ts';
+import type { QAEnvironment, QAPlan, QAProject, QARun, QARunEvidence, QASuite } from '../../src/lib/qa/types.ts';
 
 /**
  * Where E2E data lives: files under ~/.tech-lead-cockpit/qa (one user), or a shared PostgreSQL
@@ -57,6 +57,8 @@ export interface QaStore {
   listProjects(): Promise<QAProject[]>;
   /** Creates or updates a project's name and TADs (no version: the latest wins, nothing else is in it). */
   upsertProject(project: Omit<QAProject, 'updatedAt' | 'updatedBy'>, by?: string): Promise<QAProject>;
+  /** A readable evidence page for a finished run (Confluence only). */
+  saveEvidence?(run: QARun, page: { title: string; storage: string }, by?: string): Promise<QARunEvidence>;
   close?(): Promise<void>;
 }
 

@@ -1225,6 +1225,18 @@ async function handleQa(route: string, url: URL, req: IncomingMessage, res: Serv
         throw e;
       }
     }
+    if (route === 'POST /qa/runs/evidence') {
+      const body = await readJson<{ projectId?: string; runId?: string }>(req, 16 * 1024);
+      const entry = { action: 'qa.evidence' as const, spaceKey: qaStores.status().target ?? '', attachments: 1 };
+      try {
+        const evidence = await qa.publishEvidence(String(body.projectId ?? ''), String(body.runId ?? ''));
+        await audit({ ...entry, ts: new Date().toISOString(), result: 'success', title: (evidence.title ?? String(body.runId)).slice(0, 300) }).catch(() => {});
+        return send(res, 200, { evidence });
+      } catch (e) {
+        await audit({ ...entry, ts: new Date().toISOString(), result: 'failure', title: String(body.runId ?? '').slice(0, 100), error: (e as Error).message }).catch(() => {});
+        throw e;
+      }
+    }
     if (route === 'POST /qa/suite/discard') {
       const body = await readJson<{ projectId?: string; keys?: unknown }>(req, 256 * 1024);
       return send(res, 200, { suite: await qa.discardSuite(String(body.projectId ?? ''), Array.isArray(body.keys) ? body.keys.map(String).slice(0, 5_000) : undefined) });

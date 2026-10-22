@@ -1,4 +1,4 @@
-import type { QAEnvironment, QAFlow, QAPlan, QAProject, QARun, QASuite } from '../../src/lib/qa/types.ts';
+import type { QAEnvironment, QAFlow, QAPlan, QAProject, QARun, QARunEvidence, QASuite } from '../../src/lib/qa/types.ts';
 import { ConfluenceError } from '../confluence.ts';
 import { bare, KEEP_RUNS, QaConflictError, storableEnvironment, type QaStore } from './store.ts';
 
@@ -24,10 +24,10 @@ import { bare, KEEP_RUNS, QaConflictError, storableEnvironment, type QaStore } f
 
 /** What the store needs from Confluence (ConfluenceClient; tests pass a fake). */
 export interface ConfluenceApi {
-  getPage(id: string, spaceKey?: string): Promise<{ id: string; title: string; version: number; storage?: string; spaceKey?: string }>;
+  getPage(id: string, spaceKey?: string): Promise<{ id: string; title: string; version: number; storage?: string; spaceKey?: string; url?: string }>;
   childPages(pageId: string): Promise<{ id: string; title: string; version: number; labels?: string[] }[]>;
   addLabel(pageId: string, label: string): Promise<void>;
-  createPage(input: { spaceKey: string; title: string; parentId?: string; storage: string }): Promise<{ id: string; version: number }>;
+  createPage(input: { spaceKey: string; title: string; parentId?: string; storage: string }): Promise<{ id: string; version: number; url?: string }>;
   updatePage(input: { id: string; spaceKey: string; title: string; storage: string; version: number; message?: string }): Promise<{ version: number }>;
   attachments(pageId: string, filename?: string): Promise<{ id: string; title: string }[]>;
   readAttachment(pageId: string, filename: string): Promise<string | null>;
@@ -120,13 +120,13 @@ export class ConfluenceQaStore implements QaStore {
   }
 
   /** A page titled `title` (or "title (2)", … when taken in the space), labelled `label`. */
-  private async createLabelled(title: string, parentId: string, storage: string, label: string): Promise<{ id: string; title: string; version: number }> {
+  private async createLabelled(title: string, parentId: string, storage: string, label: string): Promise<{ id: string; title: string; version: number; url?: string }> {
     for (let n = 1; ; n++) {
       const t = n === 1 ? title : `${title} (${n})`;
       try {
         const page = await this.api.createPage({ spaceKey: this.at.spaceKey, title: t, parentId, storage });
         await this.api.addLabel(page.id, label);
-        return { id: page.id, title: t, version: page.version };
+        return { id: page.id, title: t, version: page.version, ...(page.url ? { url: page.url } : {}) };
       } catch (e) {
         if (!(e instanceof ConfluenceError && e.status === 400 && DUPLICATE_TITLE.test(e.message)) || n >= 9) throw e;
       }
@@ -347,6 +347,33 @@ export class ConfluenceQaStore implements QaStore {
     await this.api.putAttachment(pageId, `run-${run.id}.json`, json({ ...run, ...(by ? { createdBy: by } : {}) }), 'application/json');
     const files = await this.runFiles(pageId);
     for (const old of files.slice(0, Math.max(0, files.length - KEEP_RUNS))) await this.api.deleteAttachment(old.id).catch(() => {});
+  }
+
+  /**
+   * A readable evidence page for a finished run, under the project's run page, with the full run
+   * attached; sending the same run again updates that page. The run remembers the link.
+   */
+  async saveEvidence(run: QARun, page: { title: string; storage: string }, by?: string): Promise<QARunEvidence> {
+    if (!(await this.projectPage(run.projectId))) await this.ensureProject(run.projectId, run.projectName, note('Belum ada test case.'));
+    const runsPage = (await this.subPage(run.projectId, run.projectName, 'runs', true))!;
+    const label = `qa-evidence-${run.id.toLowerCase().replace(/[^a-z0-9_-]/g, '-')}`;
+    const existing = (await this.api.childPages(runsPage)).find((p) => (p.labels ?? []).includes(label));
+    let target: { id: string; title: string; url?: string };
+    if (existing) {
+      const full = await this.api.getPage(existing.id, this.at.spaceKey);
+      await this.api.updatePage({ id: existing.id, spaceKey: this.at.spaceKey, title: existing.title, storage: page.storage, version: full.version + 1, message: by ? `Evidence diperbarui oleh ${by}` : undefined });
+      target = { id: existing.id, title: existing.title, url: full.url };
+    } else {
+      target = await this.createLabelled(page.title, runsPage, page.storage, label);
+      await this.api.addLabel(target.id, 'qa-evidence').catch(() => {});
+    }
+    const file = `run-${run.id}.json`;
+    const stored = parse<QARun>(await this.api.readAttachment(runsPage, file).catch(() => null), 'run') ?? run;
+    const { evidence: _old, ...data } = stored;
+    await this.api.putAttachment(target.id, file, json(data), 'application/json');
+    const evidence: QARunEvidence = { pageId: target.id, title: target.title, ...(target.url ? { url: target.url } : {}), at: new Date().toISOString(), ...(by ? { by } : {}) };
+    await this.api.putAttachment(runsPage, file, json({ ...data, evidence }), 'application/json');
+    return evidence;
   }
 
   // Projects --------------------------------------------------------------------------------

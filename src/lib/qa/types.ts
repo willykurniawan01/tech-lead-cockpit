@@ -530,6 +530,16 @@ export interface QARun {
   finishedAt?: string;
   flows: QAFlowResult[];
   summary: QARunSummary;
+  /** The readable evidence page sent to Confluence for this run. */
+  evidence?: QARunEvidence;
+}
+
+export interface QARunEvidence {
+  pageId: string;
+  url?: string;
+  title?: string;
+  at: string;
+  by?: string;
 }
 
 export interface QARunRequest {

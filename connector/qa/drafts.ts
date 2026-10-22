@@ -2,7 +2,7 @@ import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { mergeSuites } from '../../src/lib/qa/merge.ts';
 import { applyChanges, diffSuites } from '../../src/lib/qa/suite-diff.ts';
-import type { QAEnvironment, QAPlan, QAProject, QARun, QASuite, QASuiteReview } from '../../src/lib/qa/types.ts';
+import type { QAEnvironment, QAPlan, QAProject, QARun, QARunEvidence, QASuite, QASuiteReview } from '../../src/lib/qa/types.ts';
 import { QaConflictError, type QaStore } from './store.ts';
 
 /**
@@ -262,6 +262,10 @@ export class DraftedQaStore implements QaStore {
   }
   listProjects(): Promise<QAProject[]> {
     return this.remote.listProjects();
+  }
+  get saveEvidence(): ((run: QARun, page: { title: string; storage: string }, by?: string) => Promise<QARunEvidence>) | undefined {
+    const remote = this.remote;
+    return remote.saveEvidence ? (run, page, by) => remote.saveEvidence!(run, page, by) : undefined;
   }
   upsertProject(project: Omit<QAProject, 'updatedAt' | 'updatedBy'>, by?: string): Promise<QAProject> {
     return this.remote.upsertProject(project, by);

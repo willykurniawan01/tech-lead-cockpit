@@ -31,6 +31,7 @@
   import E2ELogViewer from './E2ELogViewer.svelte';
   import FlowEditor from './FlowEditor.svelte';
   import SuiteReview from './SuiteReview.svelte';
+  import EvidenceButton from './EvidenceButton.svelte';
   import E2EPipeline from './E2EPipeline.svelte';
   import E2ERequirements from './E2ERequirements.svelte';
   import { bugs } from '../lib/bugs/client';
@@ -1389,6 +1390,7 @@
             <button class="btn btn-sm" onclick={() => activeRun && qa.cancelRun(activeRun.id)}>Batalkan</button>
           {:else}
             <button class="btn btn-sm" onclick={() => activeRun && copy(runReport(activeRun), 'Laporan')}><Icon name="copy" size={13} /> Salin laporan</button>
+            <EvidenceButton projectId={project.id} bind:run={activeRun} />
             {#if activeRun.flows.some((f) => f.status === 'failed' || f.status === 'error')}
               <button class="btn btn-sm" onclick={() => activeRun && repair(activeRun)} disabled={pipelineBusy || !canReadCode} title={canReadCode ? 'Agent perbaikan menganalisa tiap test yang gagal: test keliru diperbaiki, bug service ditandai' : 'Butuh Claude CLI atau Antigravity (membaca kode)'}>
                 <Icon name="sparkles" size={13} /> Perbaiki otomatis

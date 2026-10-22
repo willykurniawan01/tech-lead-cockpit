@@ -1,7 +1,7 @@
 import { api, connectorDownMessage } from '../api-base';
 import type { AiSelection } from '../ai/types';
 import type { AppSettings } from '../settings/types';
-import type { QAAgentJob, QAEnvImportAction, QAEnvImportPreview, QAEnvironment, QAGenerateJob, QAGenerateRequest, QAPipeline, QAPlan, QAProject, QARun, QARunRequest, QAStoreMigration, QAStoreStatus, QASuite, QASuiteReview, QATadRef } from './types';
+import type { QAAgentJob, QAEnvImportAction, QAEnvImportPreview, QAEnvironment, QAGenerateJob, QAGenerateRequest, QAPipeline, QAPlan, QAProject, QARun, QARunEvidence, QARunRequest, QAStoreMigration, QAStoreStatus, QASuite, QASuiteReview, QATadRef } from './types';
 
 const HEADERS = { 'Content-Type': 'application/json', 'X-TLC-Client': '1' };
 
@@ -75,6 +75,8 @@ export const qa = {
   startRun: (req: QARunRequest) => post<QARun>('/runs', req),
   runs: (projectId: string) => call<QARun[]>(`/runs${q({ projectId })}`),
   run: (projectId: string, id: string) => call<QARun>(`/runs/one${q({ projectId, id })}`),
+  /** Sends a finished run to Confluence as an evidence page (again = update it). */
+  publishEvidence: (projectId: string, runId: string) => post<{ evidence: QARunEvidence }>('/runs/evidence', { projectId, runId }).then((r) => r.evidence),
   cancelRun: (id: string) => post<{ run: QARun | null }>('/runs/cancel', { id }).then((r) => r.run),
   // Multi-agent pipeline: planner → review → writers per stage → repair after a run.
   pipeline: (projectId: string) => call<{ plan: QAPlan | null; pipeline: QAPipeline }>(`/pipeline${q({ projectId })}`),
