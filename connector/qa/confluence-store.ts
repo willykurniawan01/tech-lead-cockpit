@@ -7,11 +7,14 @@ import { bare, KEEP_RUNS, QaConflictError, storableEnvironment, type QaStore } f
  * under one parent page the user picks:
  *
  *   <parent>
- *   ├── API Testing · Environment                 environments.json
- *   └── <project> · API Testing [<projectId>]     project.json, suite.json   (body: readable summary)
- *       ├── <project> · Rencana [<projectId>]     plan.json
- *       └── <project> · Run [<projectId>]         run-<id>.json (newest KEEP_RUNS)
+ *   ├── API Testing · Environment            environments.json                      label qa-environments
+ *   └── <project> · API Testing              project.json, suite.json (body: summary) label qa-project-<id>
+ *       ├── <project> · API Testing · Rencana   plan.json                           label qa-plan-<id>
+ *       └── <project> · API Testing · Run       run-<id>.json (newest KEEP_RUNS)     label qa-runs-<id>
  *
+ * Pages are found by their label, so titles stay readable (Confluence wants titles unique in a
+ * space: a second project with the same name gets " (2)"). Pages from the first version, with the
+ * id in the title ("… · API Testing [<id>]"), are labelled and renamed when first seen.
  * The JSON attachments are the data; page bodies are summaries for people. The page version is
  * the lock: a save updates the page with version + 1 first (Confluence refuses a stale one with
  * 409), then replaces the attachment, so a save over someone else's newer one never goes
@@ -21,8 +24,9 @@ import { bare, KEEP_RUNS, QaConflictError, storableEnvironment, type QaStore } f
 
 /** What the store needs from Confluence (ConfluenceClient; tests pass a fake). */
 export interface ConfluenceApi {
-  getPage(id: string, spaceKey?: string): Promise<{ id: string; title: string; version: number; storage?: string }>;
-  childPages(pageId: string): Promise<{ id: string; title: string; version: number }[]>;
+  getPage(id: string, spaceKey?: string): Promise<{ id: string; title: string; version: number; storage?: string; spaceKey?: string }>;
+  childPages(pageId: string): Promise<{ id: string; title: string; version: number; labels?: string[] }[]>;
+  addLabel(pageId: string, label: string): Promise<void>;
   createPage(input: { spaceKey: string; title: string; parentId?: string; storage: string }): Promise<{ id: string; version: number }>;
   updatePage(input: { id: string; spaceKey: string; title: string; storage: string; version: number; message?: string }): Promise<{ version: number }>;
   attachments(pageId: string, filename?: string): Promise<{ id: string; title: string }[]>;
@@ -37,13 +41,18 @@ export interface ConfluenceLocation {
 }
 
 const ENV_TITLE = 'API Testing · Environment';
+const ENV_LABEL = 'qa-environments';
 const RUN_FILE = /^run-([A-Za-z0-9_-]{1,64})\.json$/;
-const projectTitle = (name: string, id: string) => `${clip(name)} · API Testing [${id}]`;
-const planTitle = (name: string, id: string) => `${clip(name)} · Rencana [${id}]`;
-const runsTitle = (name: string, id: string) => `${clip(name)} · Run [${id}]`;
 const clip = (s: string) => s.replace(/[[\]]/g, '').trim().slice(0, 120) || 'Proyek';
-/** The project id at the end of a project page title. */
-const idOf = (title: string) => /· API Testing \[([A-Za-z0-9_-]{1,64})\]$/.exec(title)?.[1];
+const projectTitle = (name: string) => `${clip(name)} · API Testing`;
+const subTitle = (name: string, kind: 'plan' | 'runs') => `${projectTitle(name)} · ${kind === 'plan' ? 'Rencana' : 'Run'}`;
+/** Labels are lowercase in Confluence. */
+const projectLabel = (id: string) => `qa-project-${id.toLowerCase()}`;
+const subLabel = (id: string, kind: 'plan' | 'runs') => `qa-${kind}-${id.toLowerCase()}`;
+const PROJECT_LABEL = /^qa-project-([a-z0-9_-]{1,64})$/;
+/** First-version titles carried the id: "<name> · API Testing [<id>]", "<name> · Rencana [<id>]". */
+const LEGACY = /^(.*) · (API Testing|Rencana|Run) \[([A-Za-z0-9_-]{1,64})\]$/;
+const DUPLICATE_TITLE = /already exists|judul sudah/i;
 
 const esc = (s: unknown) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 
@@ -94,8 +103,9 @@ async function pool<T, R>(items: T[], limit: number, fn: (item: T) => Promise<R>
 
 export class ConfluenceQaStore implements QaStore {
   readonly kind = 'confluence' as const;
-  /** projectId → page ids, filled from the parent's children (pages are never moved by the app). */
+  /** Lowercased projectId → its page, filled from the parent's children (pages are never moved by the app). */
   private projects = new Map<string, { id: string; title: string }>();
+  /** Project page id → its sub-pages by label. */
   private children = new Map<string, Map<string, string>>();
 
   constructor(
@@ -104,48 +114,91 @@ export class ConfluenceQaStore implements QaStore {
   ) {}
 
   /** "Tes koneksi": the parent page and whether this account may update it. */
-  async probe(canUpdate?: (pageId: string) => Promise<boolean | undefined>): Promise<{ title: string; canUpdate?: boolean }> {
+  async probe(canUpdate?: (pageId: string) => Promise<boolean | undefined>): Promise<{ title: string; spaceKey?: string; canUpdate?: boolean }> {
     const page = await this.api.getPage(this.at.parentPageId, this.at.spaceKey);
-    return { title: page.title, canUpdate: await canUpdate?.(page.id) };
+    return { title: page.title, spaceKey: page.spaceKey || undefined, canUpdate: await canUpdate?.(page.id) };
+  }
+
+  /** A page titled `title` (or "title (2)", … when taken in the space), labelled `label`. */
+  private async createLabelled(title: string, parentId: string, storage: string, label: string): Promise<{ id: string; title: string; version: number }> {
+    for (let n = 1; ; n++) {
+      const t = n === 1 ? title : `${title} (${n})`;
+      try {
+        const page = await this.api.createPage({ spaceKey: this.at.spaceKey, title: t, parentId, storage });
+        await this.api.addLabel(page.id, label);
+        return { id: page.id, title: t, version: page.version };
+      } catch (e) {
+        if (!(e instanceof ConfluenceError && e.status === 400 && DUPLICATE_TITLE.test(e.message)) || n >= 9) throw e;
+      }
+    }
+  }
+
+  /** Gives a first-version page its label and a title without the id (best effort). */
+  private async upgrade(page: { id: string; title: string }, label: string, title: string): Promise<string> {
+    try {
+      await this.api.addLabel(page.id, label);
+      const full = await this.api.getPage(page.id, this.at.spaceKey);
+      await this.api.updatePage({ id: page.id, spaceKey: this.at.spaceKey, title, storage: full.storage ?? '', version: full.version + 1, message: 'Judul dirapikan oleh Cockpit' });
+      return title;
+    } catch {
+      return page.title;
+    }
   }
 
   private async scan(): Promise<void> {
     const pages = await this.api.childPages(this.at.parentPageId);
-    this.projects = new Map(pages.flatMap((p) => (idOf(p.title) ? [[idOf(p.title)!, { id: p.id, title: p.title }] as const] : [])));
+    const found = new Map<string, { id: string; title: string }>();
+    for (const p of pages) {
+      const labelled = (p.labels ?? []).map((l) => PROJECT_LABEL.exec(l)?.[1]).find(Boolean);
+      if (labelled) {
+        found.set(labelled, { id: p.id, title: p.title });
+        continue;
+      }
+      const legacy = LEGACY.exec(p.title);
+      if (legacy && legacy[2] === 'API Testing') found.set(legacy[3].toLowerCase(), { id: p.id, title: await this.upgrade(p, projectLabel(legacy[3]), projectTitle(legacy[1])) });
+    }
+    this.projects = found;
   }
 
   private async projectPage(projectId: string): Promise<{ id: string; title: string } | undefined> {
-    if (!this.projects.has(projectId)) await this.scan();
-    return this.projects.get(projectId);
+    const key = projectId.toLowerCase();
+    if (!this.projects.has(key)) await this.scan();
+    return this.projects.get(key);
   }
 
   /** The project's page, created (with its sub-pages) on first save. */
   private async ensureProject(projectId: string, name: string, body: string): Promise<{ id: string; title: string; created: boolean }> {
     const existing = await this.projectPage(projectId);
     if (existing) return { ...existing, created: false };
-    const title = projectTitle(name, projectId);
-    const page = await this.api.createPage({ spaceKey: this.at.spaceKey, title, parentId: this.at.parentPageId, storage: body });
-    this.projects.set(projectId, { id: page.id, title });
-    return { id: page.id, title, created: true };
+    const page = await this.createLabelled(projectTitle(name), this.at.parentPageId, body, projectLabel(projectId));
+    this.projects.set(projectId.toLowerCase(), { id: page.id, title: page.title });
+    return { id: page.id, title: page.title, created: true };
   }
 
-  /** A sub-page of the project (plan, runs), found by its title and created when missing. */
+  /** A sub-page of the project (plan, runs), found by its label and created when missing. */
   private async subPage(projectId: string, name: string, kind: 'plan' | 'runs', create: boolean): Promise<string | undefined> {
     const project = await this.projectPage(projectId);
     if (!project) return undefined;
-    const title = kind === 'plan' ? planTitle(name, projectId) : runsTitle(name, projectId);
-    const suffix = `· ${kind === 'plan' ? 'Rencana' : 'Run'} [${projectId}]`;
+    const label = subLabel(projectId, kind);
     let pages = this.children.get(project.id);
-    if (!pages || ![...pages.keys()].some((t) => t.endsWith(suffix))) {
-      pages = new Map((await this.api.childPages(project.id)).map((p) => [p.title, p.id]));
+    if (!pages?.has(label)) {
+      pages = new Map<string, string>();
+      for (const p of await this.api.childPages(project.id)) {
+        for (const l of p.labels ?? []) pages.set(l, p.id);
+        const legacy = LEGACY.exec(p.title);
+        if (legacy && !(p.labels ?? []).length) {
+          const k = legacy[2] === 'Rencana' ? 'plan' : 'runs';
+          await this.upgrade(p, subLabel(legacy[3], k), subTitle(legacy[1], k));
+          pages.set(subLabel(legacy[3], k), p.id);
+        }
+      }
       this.children.set(project.id, pages);
     }
-    const found = [...pages.entries()].find(([t]) => t.endsWith(suffix));
-    if (found) return found[1];
-    if (!create) return undefined;
+    const found = pages.get(label);
+    if (found || !create) return found;
     const body = kind === 'plan' ? note('Rencana journey API Testing (lampiran plan.json). Dikelola oleh Cockpit.') : note('Riwayat run API Testing (lampiran run-*.json). Dikelola oleh Cockpit.');
-    const page = await this.api.createPage({ spaceKey: this.at.spaceKey, title, parentId: project.id, storage: body });
-    pages.set(title, page.id);
+    const page = await this.createLabelled(subTitle(name || project.title.replace(/ · API Testing( \(\d+\))?$/, ''), kind), project.id, body, label);
+    pages.set(label, page.id);
     return page.id;
   }
 
@@ -229,10 +282,10 @@ export class ConfluenceQaStore implements QaStore {
   // Environments ----------------------------------------------------------------------------
 
   private async envPage(create: boolean): Promise<{ id: string; title: string; version: number } | undefined> {
-    const found = (await this.api.childPages(this.at.parentPageId)).find((p) => p.title === ENV_TITLE);
+    const pages = await this.api.childPages(this.at.parentPageId);
+    const found = pages.find((p) => (p.labels ?? []).includes(ENV_LABEL)) ?? pages.find((p) => p.title === ENV_TITLE);
     if (found || !create) return found;
-    const page = await this.api.createPage({ spaceKey: this.at.spaceKey, title: ENV_TITLE, parentId: this.at.parentPageId, storage: note('Environment API Testing (lampiran environments.json), tanpa token atau password. Dikelola oleh Cockpit.') });
-    return { id: page.id, title: ENV_TITLE, version: page.version };
+    return this.createLabelled(ENV_TITLE, this.at.parentPageId, note('Environment API Testing (lampiran environments.json), tanpa token atau password. Dikelola oleh Cockpit.'), ENV_LABEL);
   }
 
   async listEnvironments(): Promise<QAEnvironment[]> {
@@ -306,13 +359,24 @@ export class ConfluenceQaStore implements QaStore {
         .readAttachment(p.id, 'project.json')
         .then((t) => parse<QAProject>(t, 'project.json'))
         .catch(() => null)
-        .then((doc) => ({ id, name: doc?.name ?? p.title.replace(/ · API Testing \[[^\]]+\]$/, ''), tads: doc?.tads ?? [], updatedAt: doc?.updatedAt ?? '', ...(doc?.updatedBy ? { updatedBy: doc.updatedBy } : {}) })),
+        .then((doc) => ({ id: doc?.id ?? id, name: doc?.name ?? p.title.replace(/ · API Testing( \(\d+\))?$/, ''), tads: doc?.tads ?? [], ...(doc?.source === 'qa' ? { source: 'qa' as const } : {}), updatedAt: doc?.updatedAt ?? '', ...(doc?.updatedBy ? { updatedBy: doc.updatedBy } : {}) })),
     );
     return docs.sort((a, b) => a.name.localeCompare(b.name));
   }
 
   async upsertProject(project: Omit<QAProject, 'updatedAt' | 'updatedBy'>, by?: string): Promise<QAProject> {
     const page = await this.ensureProject(project.id, project.name, note('Belum ada test case.'));
+    // A renamed project gets its page renamed (a taken title keeps the old one).
+    const wanted = projectTitle(project.name);
+    if (!page.created && page.title !== wanted && !page.title.startsWith(`${wanted} (`)) {
+      const full = await this.api.getPage(page.id, this.at.spaceKey);
+      try {
+        await this.api.updatePage({ id: page.id, spaceKey: this.at.spaceKey, title: wanted, storage: full.storage ?? '', version: full.version + 1, message: by ? `Nama proyek diubah oleh ${by}` : undefined });
+        this.projects.set(project.id.toLowerCase(), { id: page.id, title: wanted });
+      } catch (e) {
+        if (!(e instanceof ConfluenceError && e.status === 400 && DUPLICATE_TITLE.test(e.message))) throw e;
+      }
+    }
     const saved: QAProject = { ...project, updatedAt: new Date().toISOString(), ...(by ? { updatedBy: by } : {}) };
     // No version: only Tech Lead Cockpit writes it, and the latest name and TADs win.
     await this.api.putAttachment(page.id, 'project.json', json(saved), 'application/json');

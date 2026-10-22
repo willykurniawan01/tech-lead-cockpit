@@ -9,9 +9,9 @@ import { KEEP_RUNS, QaConflictError } from './store.ts';
 /** An in-memory Confluence: pages with versions (409 on a stale update) and attachments. */
 function fakeConfluence() {
   let seq = 100;
-  const pages = new Map<string, { id: string; title: string; parent?: string; version: number; storage: string }>();
+  const pages = new Map<string, { id: string; title: string; parent?: string; version: number; storage: string; labels: string[] }>();
   const files = new Map<string, Map<string, { id: string; text: string }>>();
-  pages.set('1', { id: '1', title: 'QA', version: 1, storage: '' });
+  pages.set('1', { id: '1', title: 'QA', version: 1, storage: '', labels: [] });
   const page = (id: string) => {
     const p = pages.get(id);
     if (!p) throw new ConfluenceError('Tidak ditemukan (404).', 404, 'not-found');
@@ -28,20 +28,26 @@ function fakeConfluence() {
     },
     async childPages(id) {
       api.calls++;
-      return [...pages.values()].filter((p) => p.parent === id).map((p) => ({ id: p.id, title: p.title, version: p.version }));
+      return [...pages.values()].filter((p) => p.parent === id).map((p) => ({ id: p.id, title: p.title, version: p.version, labels: [...p.labels] }));
     },
     async createPage(input) {
-      if ([...pages.values()].some((p) => p.title === input.title)) throw new ConfluenceError('Judul sudah dipakai.', 400, 'bad-request');
+      if ([...pages.values()].some((p) => p.title === input.title)) throw new ConfluenceError('A page with this title already exists.', 400, 'bad-request');
       const id = String(seq++);
-      pages.set(id, { id, title: input.title, parent: input.parentId, version: 1, storage: input.storage });
+      pages.set(id, { id, title: input.title, parent: input.parentId, version: 1, storage: input.storage, labels: [] });
       return { id, version: 1 };
     },
     async updatePage(input) {
       const p = page(input.id);
       if (input.version !== p.version + 1) throw new ConfluenceError('Konflik versi di Confluence (409).', 409, 'conflict');
+      if ([...pages.values()].some((x) => x.id !== p.id && x.title === input.title)) throw new ConfluenceError('A page with this title already exists.', 400, 'bad-request');
       p.version = input.version;
       p.storage = input.storage;
+      p.title = input.title;
       return { version: p.version };
+    },
+    async addLabel(id, label) {
+      const p = page(id);
+      if (!p.labels.includes(label)) p.labels.push(label);
     },
     async attachments(id, filename) {
       return [...(files.get(id)?.entries() ?? [])].filter(([name]) => !filename || name === filename).map(([name, f]) => ({ id: f.id, title: name }));
@@ -62,6 +68,7 @@ function fakeConfluence() {
   return api;
 }
 
+
 const at = { spaceKey: 'QA', parentPageId: '1' };
 const flow = (id: string, extra: Partial<QAFlow> = {}): QAFlow => ({ id, name: `Flow ${id}`, description: '', category: 'happy-path', taskTitles: [], enabled: true, steps: [], ...extra });
 const suite = (extra: Partial<QASuite> = {}): QASuite => ({ projectId: 'promo', projectName: 'Promo Engine', flows: [flow('a'), flow('b')], updatedAt: 'x', ...extra });
@@ -74,8 +81,9 @@ describe('ConfluenceQaStore', () => {
     const store = new ConfluenceQaStore(cf, at);
     const a = await store.saveSuite(suite(), 'tl@example.test');
     expect(a.version).toBe(1);
-    const projectPage = [...cf.pages.values()].find((p) => p.title === 'Promo Engine · API Testing [promo]')!;
+    const projectPage = [...cf.pages.values()].find((p) => p.title === 'Promo Engine · API Testing')!;
     expect(projectPage.parent).toBe('1');
+    expect(projectPage.labels).toEqual(['qa-project-promo']);
     expect(cf.files.get(projectPage.id)?.has('suite.json')).toBe(true);
     expect(projectPage.storage).toContain('2 test case');
 
@@ -97,6 +105,32 @@ describe('ConfluenceQaStore', () => {
     expect(await store.listProjects()).toEqual([expect.objectContaining({ id: 'promo', name: 'Promo Engine', tads: [{ title: 'TAD Promo', confluencePageId: '42' }] })]);
     const saved = await store.saveSuite(suite(), 'qa');
     expect(saved.version).toBe(2);
+  });
+
+  it('finds pages by label: readable titles, " (2)" for a taken name, renames follow the project', async () => {
+    const cf = fakeConfluence();
+    const store = new ConfluenceQaStore(cf, at);
+    await store.saveSuite(suite(), 'tl');
+    await store.saveSuite(suite({ projectId: 'promo2' }), 'tl');
+    await store.saveRun(run(1), 'qa');
+    const titles = [...cf.pages.values()].map((p) => p.title);
+    expect(titles).toEqual(expect.arrayContaining(['Promo Engine · API Testing', 'Promo Engine · API Testing (2)', 'Promo Engine · API Testing · Run']));
+    expect((await store.getSuite('promo2'))?.projectId).toBe('promo2');
+    await store.upsertProject({ id: 'promo', name: 'Promo Baru', tads: [] }, 'qa');
+    expect([...cf.pages.values()].some((p) => p.title === 'Promo Baru · API Testing')).toBe(true);
+    expect((await new ConfluenceQaStore(cf, at).getSuite('promo'))?.flows).toHaveLength(2);
+  });
+
+  it('labels and renames pages from the first version (id in the title)', async () => {
+    const cf = fakeConfluence();
+    const old = await cf.createPage({ spaceKey: 'QA', title: 'Promo Engine · API Testing [Promo-1]', parentId: '1', storage: 'x' });
+    await cf.putAttachment(old.id, 'project.json', Buffer.from(JSON.stringify({ id: 'Promo-1', name: 'Promo Engine', tads: [] })), 'application/json');
+    const plan = await cf.createPage({ spaceKey: 'QA', title: 'Promo Engine · Rencana [Promo-1]', parentId: old.id, storage: 'x' });
+    const store = new ConfluenceQaStore(cf, at);
+    expect(await store.listProjects()).toEqual([expect.objectContaining({ id: 'Promo-1', name: 'Promo Engine' })]);
+    expect(cf.pages.get(old.id)).toMatchObject({ title: 'Promo Engine · API Testing', labels: ['qa-project-promo-1'] });
+    expect(await store.getPlan('Promo-1')).toBeNull();
+    expect(cf.pages.get(plan.id)).toMatchObject({ title: 'Promo Engine · API Testing · Rencana', labels: ['qa-plan-promo-1'] });
   });
 
   it('keeps plans on their own page, so editing a plan never collides with test cases', async () => {

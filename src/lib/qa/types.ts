@@ -333,6 +333,8 @@ export interface QAProject {
   id: string;
   name: string;
   tads: QATadRef[];
+  /** 'qa' = made in QA Cockpit (its name and TADs are edited there); absent = Tech Lead Cockpit keeps it. */
+  source?: 'qa';
   updatedAt: string;
   updatedBy?: string;
 }

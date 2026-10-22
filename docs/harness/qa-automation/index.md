@@ -226,10 +226,11 @@ Data E2E (proyek, suite beserta grup, rencana journey, riwayat run, dan environm
 ```
 <halaman induk>
 ├── API Testing · Environment                 environments.json
-└── <proyek> · API Testing [<projectId>]      project.json, suite.json   (isi: ringkasan untuk dibaca)
-    ├── <proyek> · Rencana [<projectId>]      plan.json
-    └── <proyek> · Run [<projectId>]          run-<id>.json (50 terbaru)
+└── <proyek> · API Testing                    project.json, suite.json   (isi: ringkasan)   label qa-project-<id>
+    ├── <proyek> · API Testing · Rencana      plan.json                                     label qa-plan-<id>
+    └── <proyek> · API Testing · Run          run-<id>.json (50 terbaru)                    label qa-runs-<id>
 ```
+- **Halaman dikenali dari label, bukan judul.** Judul tetap rapi; nama yang sudah dipakai di space mendapat akhiran ` (2)`. Mengganti nama proyek ikut mengganti judul halaman. Halaman versi pertama (ID di judul, `… · API Testing [<id>]`) otomatis diberi label dan dirapikan judulnya saat pertama dibaca. Format ini (`connector/qa/confluence-store.ts`) harus identik dengan QA Cockpit.
 - **Lampiran JSON adalah data; isi halaman hanya ringkasan** (grup, test case, kategori, jumlah step) dengan catatan "dikelola Cockpit, jangan diedit manual".
 - **Kunci = versi halaman.** Simpan: baca versi halaman → bila beda dari versi yang dimuat, `QaConflictError` → update halaman ke versi+1 (Confluence menolak 409 bila ada yang mendahului) → baru lampiran ditulis (`putAttachment`, gagal = error, tidak ditelan). Rencana dan environment punya halaman sendiri, jadi tidak saling mengunci dengan test case. Run tanpa kunci (tiap run file baru); yang lebih lama dari 50 dihapus.
 - **Environment:** satu halaman untuk semua; environment baru tidak pernah bentrok, edit environment dengan versi lama ditolak.

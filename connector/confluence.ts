@@ -446,13 +446,13 @@ export class ConfluenceClient {
   }
 
   /** Direct child pages (id, title, version), same v1 endpoint on Cloud and Data Center. */
-  async childPages(pageId: string): Promise<{ id: string; title: string; version: number }[]> {
-    const out: { id: string; title: string; version: number }[] = [];
+  async childPages(pageId: string): Promise<{ id: string; title: string; version: number; labels: string[] }[]> {
+    const out: { id: string; title: string; version: number; labels: string[] }[] = [];
     for (let start = 0; start < 2_000; start += 200) {
-      const r = await this.request<{ results: { id: string; title: string; version?: { number?: number } }[]; size?: number }>(
-        `/rest/api/content/${encodeURIComponent(pageId)}/child/page?limit=200&start=${start}&expand=version`,
+      const r = await this.request<{ results: { id: string; title: string; version?: { number?: number }; metadata?: { labels?: { results?: { name: string }[] } } }[]; size?: number }>(
+        `/rest/api/content/${encodeURIComponent(pageId)}/child/page?limit=200&start=${start}&expand=version,metadata.labels`,
       );
-      out.push(...r.results.map((p) => ({ id: String(p.id), title: p.title, version: Number(p.version?.number ?? 1) })));
+      out.push(...r.results.map((p) => ({ id: String(p.id), title: p.title, version: Number(p.version?.number ?? 1), labels: (p.metadata?.labels?.results ?? []).map((l) => l.name) })));
       if (r.results.length < 200) break;
     }
     return out;
@@ -499,6 +499,11 @@ export class ConfluenceClient {
       ? `/rest/api/content/${encodeURIComponent(pageId)}/child/attachment/${existing[0].id}/data`
       : `/rest/api/content/${encodeURIComponent(pageId)}/child/attachment`;
     await this.request(path, { method: 'POST', body: form, headers: { 'X-Atlassian-Token': 'no-check' } });
+  }
+
+  /** Adds a (global) label to a page. */
+  async addLabel(pageId: string, label: string): Promise<void> {
+    await this.request(`/rest/api/content/${encodeURIComponent(pageId)}/label`, { method: 'POST', body: JSON.stringify([{ prefix: 'global', name: label }]) });
   }
 
   /** Removes an attachment (to the space's trash). */
