@@ -14,6 +14,12 @@
   import { appSettings } from '../lib/settings/store.svelte';
   import type { CoderProfileId, CoderRun, CoderRunStatus } from '../lib/coder/types';
   import { buildCodeFixSpec, codeFixTitle, e2eDraftId, failedStep, failingService } from '../lib/qa/code-fix';
+  import { drafts as draftStore, draftTitle } from '../tad/drafts.svelte';
+  import { startGeneratorJob } from '../tad/generator-client';
+  import { finishGeneratorJob } from '../tad/job-delivery';
+  import { api } from '../lib/api-base';
+  import type { GeneratorJob } from '../lib/generator/types';
+  import { buildTadUpdatePrompt, collectFindings, FINDING_LABELS, likelyTad, type FindingKind } from '../lib/qa/tad-findings';
   import { latestResults, resultBucket, resultCounts, type LatestResult, type ResultBucket } from '../lib/qa/latest';
   import { addGroup, cleanGroupName, edgeOfGroup, groupCheck, groupFlows, groupOrder, moveFlowInGroup, moveFlowToGroup, moveGroup, removeGroup, renameGroup, setGroupEnabled, UNGROUPED_LABEL, withGroups } from '../lib/qa/groups';
   import { QA_CATEGORIES, QA_CATEGORY_LABELS, type QACategory, type QAEnvironment, type QAFlow, type QAFlowResult, type QAGenerateJob, type QAGenerateRequest, type QAPipeline, type QAPlan, type QARun, type QASuspect, type QAStepResult, type QAStepStatus, type QASuite } from '../lib/qa/types';
@@ -246,6 +252,91 @@
     } finally {
       fixStarting = false;
     }
+  }
+
+  // "Update TAD dari temuan": findings from testing that the TAD misses, sent to the TAD's AI
+  // revision as a background job. The edit always comes back as a proposal to review in the TAD.
+  const projectTads = $derived(projectDrafts(project, drafts));
+  const findings = $derived(suite ? collectFindings({ suite, runs, latest, coderRuns }) : []);
+  let tadOpen = $state(false);
+  let tadDraftId = $state('');
+  let tadPicked = $state(new Set<string>());
+  let tadNote = $state('');
+  let tadAi = $state<AiSelection>(loadAiSelection('generator'));
+  let tadStarting = $state(false);
+  const FINDING_ORDER: FindingKind[] = ['repair', 'clarify', 'note', 'warning', 'edited', 'suspect', 'failed'];
+  const tadTasks = (draftId: string) => tasks.filter((t) => t.draftId === draftId).map((t) => t.title);
+  /** Findings about another TAD of the project than the chosen one. */
+  const otherTad = (taskTitles: string[]) => taskTitles.length > 0 && !taskTitles.some((t) => tadTasks(tadDraftId).includes(t));
+
+  function openTadUpdate() {
+    if (!projectTads.length) return toasts.show('Proyek ini belum punya TAD.', 'err');
+    const suggested = findings.filter((f) => f.suggested);
+    tadDraftId = likelyTad(suggested.length ? suggested : findings, projectTads.map((d) => ({ draftId: d.id, taskTitles: tadTasks(d.id) }))) ?? projectTads[0].id;
+    tadPicked = new Set(suggested.filter((f) => !otherTad(f.taskTitles)).map((f) => f.id));
+    tadNote = '';
+    tadOpen = true;
+  }
+
+  async function startTadUpdate() {
+    const draft = draftStore.drafts.find((d) => d.id === tadDraftId);
+    const chosen = findings.filter((f) => tadPicked.has(f.id));
+    if (!draft || (!chosen.length && !tadNote.trim())) return;
+    if (draft.pendingJobId) return toasts.show('AI masih mengerjakan TAD ini. Tunggu selesai atau lihat di halaman TAD.', 'err');
+    tadStarting = true;
+    try {
+      const prompt = buildTadUpdatePrompt(chosen, tadNote);
+      draftStore.addChatMessage(draft.id, { sender: 'user', text: `Update TAD dari ${chosen.length} temuan E2E (proyek ${project.name}).${tadNote.trim() ? `\n\nCatatan: ${tadNote.trim()}` : ''}` });
+      const { job, alreadyRunning } = await startGeneratorJob(draft, prompt, tadAi, 'edit');
+      if (alreadyRunning) return toasts.show('AI masih mengerjakan instruksi lain untuk TAD ini.', 'err');
+      draftStore.update(draft.id, { pendingJobId: job.id, pendingReview: true });
+      draftStore.saveNow();
+      tadOpen = false;
+      toasts.show(`AI memperbarui TAD di background. Hasilnya jadi usulan yang direview di TAD.`, 'ok', 6000);
+    } catch (e) {
+      toasts.show(`Gagal memulai update TAD: ${(e as Error).message}`, 'err');
+    } finally {
+      tadStarting = false;
+    }
+  }
+
+  /** TAD updates started from here that are still running, and finished ones waiting for review. */
+  const tadRunning = $derived(projectTads.filter((d) => d.pendingJobId && d.pendingReview));
+  const tadProposals = $derived(projectTads.filter((d) => d.proposal));
+  // Deliver a finished update even when the TAD page is closed (job-delivery hands each job over once).
+  $effect(() => {
+    const pending = tadRunning.map((d) => [d.id, d.pendingJobId!] as const);
+    if (!pending.length) return;
+    let stop = false;
+    const tick = async () => {
+      for (const [draftId, jobId] of pending) {
+        if (stop) return;
+        const res = await fetch(api(`/api/connector/chat/jobs?id=${encodeURIComponent(jobId)}`), { headers: { 'X-TLC-Client': '1' } }).catch(() => null);
+        if (!res) continue;
+        if (res.status === 404) {
+          draftStore.update(draftId, { pendingJobId: undefined, pendingReview: undefined });
+          draftStore.addChatMessage(draftId, { sender: 'assistant', text: 'Job AI tidak ditemukan lagi (connector di-restart penuh). Silakan jalankan ulang Update TAD dari temuan.', isError: true });
+          continue;
+        }
+        const job = (await res.json().catch(() => null)) as GeneratorJob | null;
+        if (job && job.status !== 'running') finishGeneratorJob(draftId, job, { reviewMode: true });
+      }
+    };
+    const t = setInterval(() => void tick(), 2_000);
+    void tick();
+    return () => {
+      stop = true;
+      clearInterval(t);
+    };
+  });
+  function openTadReview(draftId: string) {
+    try {
+      sessionStorage.setItem('tlc.tad.openReview', draftId);
+    } catch {
+      /* the chip on the TAD page still opens it */
+    }
+    draftStore.select(draftId);
+    location.hash = '#/tad';
   }
 
   function openResult(r: LatestResult) {
@@ -797,6 +888,17 @@
 
   <E2EPipeline projectId={project.id} bind:plan bind:pipeline existingFlows={suite?.flows.length ?? 0} onsuite={reloadSuite} />
 
+  {#each tadRunning as d (d.id)}
+    <div class="banner"><span class="spinner" aria-hidden="true"></span><span>AI memperbarui TAD <strong>{draftTitle(d)}</strong> dari temuan E2E…</span></div>
+  {/each}
+  {#each tadProposals.filter((d) => !tadRunning.includes(d)) as d (d.id)}
+    <div class="banner tad-ready">
+      <Icon name="sparkles" size={14} />
+      <span>Usulan perubahan TAD <strong>{draftTitle(d)}</strong> menunggu review.</span>
+      <button class="btn btn-sm btn-primary" onclick={() => openTadReview(d.id)}><Icon name="eye" size={13} /> Review di TAD</button>
+    </div>
+  {/each}
+
   {#if coderRuns.length}
     <section class="code-fixes" id="e2e-code-fixes">
       <h3 class="small"><Icon name="code" size={13} /> Perbaikan kode dari test yang gagal</h3>
@@ -844,6 +946,7 @@
           <button class="btn btn-ghost btn-sm" onclick={() => setAll(false)}>{searching ? 'Kosongkan yang tampil' : 'Kosongkan'}</button>
           <span class="grow"></span>
           <button class="btn btn-sm" class:btn-primary={fixOpen} onclick={() => (fixOpen ? (fixOpen = false) : openFix())} disabled={pipelineBusy} title="AI memperbaiki test case sesuai instruksimu (membaca kode, hanya baca)"><Icon name="sparkles" size={13} /> Perbaiki dengan AI</button>
+          <button class="btn btn-sm" onclick={openTadUpdate} disabled={!projectTads.length} title="Kirim temuan E2E yang kelewat atau ambigu di TAD ke AI untuk memperbarui TAD (diusulkan dulu, direview di TAD)"><Icon name="doc" size={13} /> Update TAD dari temuan{findings.filter((f) => f.suggested).length ? ` (${findings.filter((f) => f.suggested).length})` : ''}</button>
           <button class="btn btn-sm" class:btn-primary={newGroupOpen} onclick={() => (newGroupOpen = !newGroupOpen)} title="Grup untuk mengelompokkan test case (urutan grup = urutan run)"><Icon name="plus" size={13} /> Grup baru</button>
           <button class="btn btn-sm" onclick={() => addFlow()}><Icon name="plus" size={13} /> Flow manual</button>
         </div>
@@ -1181,6 +1284,55 @@
   </form>
 {/snippet}
 
+<Modal bind:open={tadOpen} title="Update TAD dari temuan E2E" subtitle="Temuan pengujian yang kelewat atau ambigu di TAD; AI mengusulkan perubahan, kamu review di TAD." width={860}>
+  <div class="fix-form">
+    <label class="field">
+      <span>TAD yang diperbarui</span>
+      <select class="input" bind:value={tadDraftId}>
+        {#each projectTads as d (d.id)}<option value={d.id}>{draftTitle(d)}{d.pendingJobId ? ' (AI sedang bekerja)' : ''}</option>{/each}
+      </select>
+    </label>
+    {#if !findings.length}
+      <p class="muted small">Belum ada temuan otomatis (catatan AI, test yang diperbaiki, endpoint di luar rencana, atau test gagal). Kamu tetap bisa menulis temuanmu sendiri di catatan.</p>
+    {:else}
+      <div class="findings">
+        {#each FINDING_ORDER as kind (kind)}
+          {@const items = findings.filter((f) => f.kind === kind)}
+          {#if items.length}
+            <div class="finding-group">
+              <div class="finding-head small">
+                <strong>{FINDING_LABELS[kind]}</strong> <span class="muted">({items.length})</span>
+                <span class="grow"></span>
+                <button class="link-btn small" onclick={() => (tadPicked = new Set([...tadPicked, ...items.map((f) => f.id)]))}>pilih semua</button>
+                <button class="link-btn small" onclick={() => (tadPicked = new Set([...tadPicked].filter((id) => !items.some((f) => f.id === id))))}>kosongkan</button>
+              </div>
+              {#each items as f (f.id)}
+                <label class="finding" class:other={otherTad(f.taskTitles)}>
+                  <input type="checkbox" checked={tadPicked.has(f.id)} onchange={() => (tadPicked = toggle(tadPicked, f.id))} />
+                  <span class="grow">
+                    <span class="small"><strong>{f.title}</strong>{#if otherTad(f.taskTitles)} <span class="chip">TAD lain</span>{/if}</span>
+                    <span class="muted small finding-detail">{f.detail}</span>
+                  </span>
+                </label>
+              {/each}
+            </div>
+          {/if}
+        {/each}
+      </div>
+    {/if}
+    <label class="field">
+      <span>Catatan / temuan tambahan <em class="muted">(opsional)</em></span>
+      <textarea class="input" rows="3" bind:value={tadNote} placeholder="mis. TAD belum menyebut batas maksimal 5 dokumen pendukung per promo"></textarea>
+    </label>
+    <AiPicker value={tadAi} onchange={(s) => (tadAi = s)} />
+    <p class="muted small">AI membaca TAD dan memperbarui hanya bagian yang kelewat atau ambigu menurut temuan. Bila temuan menunjukkan kode yang salah (TAD sudah jelas), TAD tidak diubah. Hasilnya selalu jadi <strong>usulan</strong> yang kamu review (diff) di halaman TAD sebelum masuk; tidak ada yang dipublish ke Confluence.</p>
+  </div>
+  {#snippet footer()}
+    <button class="btn btn-ghost" onclick={() => (tadOpen = false)}>Batal</button>
+    <button class="btn btn-primary" onclick={startTadUpdate} disabled={tadStarting || !tadDraftId || (!tadPicked.size && !tadNote.trim())}><Icon name="play" size={13} /> {tadStarting ? 'Memulai…' : `Jalankan di background (${tadPicked.size} temuan)`}</button>
+  {/snippet}
+</Modal>
+
 <Modal bind:open={fixOpenModal} title="Perbaiki kode dari test yang gagal" subtitle={fixTarget?.flow.name} width={760}>
   {#if fixTarget}
     {@const st = failedStep(fixTarget.result)}
@@ -1398,6 +1550,51 @@
   .empty-actions {
     display: flex;
     gap: 8px;
+  }
+  /* "Update TAD dari temuan": the findings checklist and the banners. */
+  .findings {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    max-height: 46vh;
+    overflow-y: auto;
+    padding-right: 4px;
+  }
+  .finding-group {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .finding-head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .finding {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    padding: 6px 8px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+  }
+  .finding.other {
+    opacity: 0.7;
+  }
+  .finding .grow {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+  }
+  .finding-detail {
+    white-space: pre-wrap;
+    word-break: break-word;
+    max-height: 4.5em;
+    overflow: hidden;
+  }
+  .tad-ready {
+    background: var(--ok-soft);
   }
   /* "Perbaiki kode": the runs panel, the badge on a card, and the dialog. */
   .code-fixes {

@@ -57,6 +57,7 @@ sequenceDiagram
 |---|---|---|
 | [`src/tad/TadWorkspace.svelte`](file:///Users/ridwan/mine/tech-lead-cockpit/src/tad/TadWorkspace.svelte) | Workspace Shell | Tampilan utama TAD: mengelola draft aktif, tab editor (Markdown, Preview, Word View, Task Board, Proposal Review), status validasi, dan bar kontrol. |
 | [`src/tad/ChatGeneratorPane.svelte`](file:///Users/ridwan/mine/tech-lead-cockpit/src/tad/ChatGeneratorPane.svelte) | Panel AI Generator | Antarmuka interaksi prompt dengan AI: pemilihan model, streaming aktivitas file yang dibaca/diedit, tombol cancel job, dan input instruksi. |
+| [`src/tad/job-delivery.ts`](../../../src/tad/job-delivery.ts) | Penyerahan Hasil Job | `finishGeneratorJob`: menyerahkan job generator yang selesai ke draft-nya (usulan untuk direview, revisi dengan rollback, update scope, atau pesan chat). Dipakai panel chat dan halaman lain yang memulai job di background (tab E2E). Tiap job diserahkan sekali saja. Draft dengan `pendingReview` selalu mendapat usulan, apa pun saklar review di chat. Test di [`job-delivery.test.ts`](../../../src/tad/job-delivery.test.ts). |
 | [`src/tad/DraftSidebar.svelte`](file:///Users/ridwan/mine/tech-lead-cockpit/src/tad/DraftSidebar.svelte) | Sidebar Drafts | Daftar seluruh dokumen draft TAD lokal, pencarian draft, pembuatan draft baru, dan penghapusan draft. |
 | [`src/tad/PreviewPane.svelte`](file:///Users/ridwan/mine/tech-lead-cockpit/src/tad/PreviewPane.svelte) | Preview Renderer | Merender preview TAD dengan Markdown parser, highlight code, styling tabel tadgen, dan diagram Mermaid live rendering. |
 | [`src/tad/PublishDialog.svelte`](file:///Users/ridwan/mine/tech-lead-cockpit/src/tad/PublishDialog.svelte) | Dialog Publish | Modal publish ke Confluence: pemilihan Space, Parent Page, judul halaman, opsi Mermaid attachment, perbandingan versi, AI generator Catatan Versi (changelog), dan opsi sinkronisasi Change History dokumen. |
@@ -294,6 +295,12 @@ flowchart TD
   ```
 
 ---
+
+## 🧪 Update TAD dari temuan E2E
+
+Tab E2E Test proyek bisa memulai revisi AI untuk salah satu TAD proyek dari temuan pengujian (lihat [QA Automation](../qa-automation/index.md#update-tad-dari-temuan-e2e)). Jalurnya sama dengan chat (`startGeneratorJob`, `POST /chat/jobs`, AI mengedit `TAD.md` di workspace draft), tapi draft ditandai `pendingReview: true`. Hasilnya selalu jadi **usulan** (`drafts.setProposal`) yang direview di `ProposalReview`, tidak langsung masuk ke TAD, dan tidak ada yang dipublish ke Confluence.
+
+Tab E2E memantau job-nya sendiri, jadi halaman TAD tidak perlu dibuka. Kalau tab E2E ditutup lebih dulu, panel chat TAD mengambil alih saat dibuka (`pendingJobId`). Tombol **Review di TAD** menyimpan `tlc.tad.openReview` di sessionStorage, dan `TadWorkspace` langsung membuka review usulan draft itu.
 
 ## 🛠️ Panduan Development & Ekstensi Fitur
 

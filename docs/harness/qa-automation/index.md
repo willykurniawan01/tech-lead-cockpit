@@ -47,6 +47,7 @@ sequenceDiagram
 | [`src/projects/E2EEnvironmentModal.svelte`](file:///Users/ridwan/mine/tech-lead-cockpit/src/projects/E2EEnvironmentModal.svelte) | Modal Manajemen Environment | Pengaturan URL base, auth token, dan mock variables untuk environment pengujian (Staging, Development, Local). Modal selebar 1080px. Base URL per service dan Variabel masing-masing selebar penuh, dan tinggi textarea mengikuti jumlah baris (`rowsFor`, 6–18 baris). |
 | [`src/lib/qa/client.ts`](file:///Users/ridwan/mine/tech-lead-cockpit/src/lib/qa/client.ts) | QA API Client | Penghubung antarmuka UI dengan endpoint connector `/api/connector/qa/*`. |
 | [`src/lib/qa/types.ts`](file:///Users/ridwan/mine/tech-lead-cockpit/src/lib/qa/types.ts) | Definisi Tipe Data QA | Schema untuk `QASuite` (termasuk `groups`), `QAScenario`, `QAStep`, `QAEnvironment`, dan `QARunResult`. |
+| [`src/lib/qa/tad-findings.ts`](../../../src/lib/qa/tad-findings.ts) | Temuan untuk TAD | `collectFindings`: temuan E2E yang mungkin kelewat di TAD (catatan AI, test diperbaiki agent repair, pertanyaan coder agent, endpoint di luar rencana, test diubah lewat Perbaiki dengan AI, dugaan bug, test gagal); `likelyTad` memilih TAD tujuan; `buildTadUpdatePrompt` menyusun instruksi revisi. Test di [`tad-findings.test.ts`](../../../src/lib/qa/tad-findings.test.ts). |
 | [`src/lib/qa/code-fix.ts`](../../../src/lib/qa/code-fix.ts) | Perbaiki Kode dari Test Gagal | `buildCodeFixSpec`: spesifikasi coder run bugfix dari flow yang gagal (step yang gagal, request/response tanpa header, assertion gagal, definisi test, Detail Task TAD, catatan); `failingService` untuk default repo; `e2eDraftId` = `e2e-<projectId>`. Test di [`code-fix.test.ts`](../../../src/lib/qa/code-fix.test.ts). |
 | [`src/lib/qa/latest.ts`](../../../src/lib/qa/latest.ts) | Hasil Terakhir per Flow | `latestResults`: hasil final (lulus/gagal/error/diblokir) tiap flow dari run terbaru yang benar-benar menjalankannya di environment terpilih; `resultBucket`/`resultCounts` untuk filter dan hitungan. Test di [`latest.test.ts`](../../../src/lib/qa/latest.test.ts). |
 | [`src/lib/qa/groups.ts`](../../../src/lib/qa/groups.ts) | Grup Test Case | Fungsi murni untuk grup di tab Skenario: urutan grup, tampilan per grup, status centang grup, tambah/ganti nama/hapus/urutkan grup, pindah flow antar grup dan di dalam grup. Dipakai UI dan connector. Test di [`groups.test.ts`](../../../src/lib/qa/groups.test.ts). |
@@ -112,6 +113,20 @@ Tab Skenario menampilkan hasil tiap flow tanpa perlu membuka Hasil Run.
 - **Kartu flow.** Badge `Lulus · 22/10, 14.15` (atau Gagal/Error/Diblokir) muncul dengan tooltip waktu dan environment. Mengklik badge membuka run itu di tab Hasil Run. Flow yang belum pernah dijalankan diberi badge "Belum dijalankan". Saat run berjalan, badge "Berjalan"/"Menunggu" muncul di sampingnya.
 - **Judul grup.** Ringkasan `✓ n lulus · ✗ n gagal · n belum` atas semua flow di grup.
 - **Filter.** Chip Semua / Lulus / Gagal / Belum dijalankan beserta jumlahnya, digabung dengan pencarian dan kategori. Saat filter atau pencarian aktif, tombolnya menjadi **Centang yang tampil** / **Kosongkan yang tampil** dan hanya mengubah flow yang tampil. Ini memudahkan menjalankan ulang yang gagal saja.
+
+## 📘 Update TAD dari temuan E2E
+
+Tombol **Update TAD dari temuan (n)** di toolbar Skenario mengirim temuan pengujian yang kelewat atau ambigu di TAD ke revisi AI TAD, sebagai job background.
+
+- **Temuan** (`collectFindings`):
+  - **Dicentang otomatis:** catatan/asumsi AI di suite, test yang diperbaiki agent repair karena beda dengan kode (`repairNote` "Test diperbaiki: …"), dan pertanyaan coder agent (run Perbaiki kode berstatus `needs-input` dengan `BUTUH KLARIFIKASI:`).
+  - **Ditampilkan tapi tidak dicentang:** endpoint di luar rencana, test yang diubah lewat Perbaiki dengan AI ("Diperbaiki AI: …"), dugaan bug service, dan test yang gagal. Temuan jenis ini lebih sering soal test atau kode daripada celah di TAD.
+  - Kegagalan karena lingkungan tidak dihitung.
+- **Dialog:**
+  - **TAD tujuan:** default ke TAD yang paling banyak disebut oleh temuan (lewat judul task, `likelyTad`). Temuan untuk TAD lain ditandai dan tidak dicentang.
+  - **Isi lain:** checklist per jenis, catatan tambahan, dan pilihan AI.
+- **Instruksi** (`buildTadUpdatePrompt`). AI hanya melengkapi atau memperjelas bagian yang kelewat (Detail Task: validasi, kode error, response, alur, aturan bisnis). TAD tidak diubah untuk menyesuaikan kode yang salah. AI tidak mengarang aturan di luar temuan, dan mengakhiri dengan ringkasan per temuan: diterapkan atau tidak, beserta alasannya.
+- **Background dan review.** Job jalan lewat `startGeneratorJob` dengan `pendingReview: true`. Tab E2E memantau job dan menyerahkannya dengan `finishGeneratorJob`, jadi hasilnya selalu jadi usulan di TAD (lihat [TAD Workspace](../tad/index.md#update-tad-dari-temuan-e2e)). Banner di tab E2E menampilkan "AI memperbarui TAD …" lalu "Usulan perubahan TAD … menunggu review", dengan tombol **Review di TAD**.
 
 ## 🧑‍💻 Perbaiki kode dari test yang gagal (background, tanpa tiket)
 

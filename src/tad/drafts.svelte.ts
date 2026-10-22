@@ -66,6 +66,8 @@ export interface Draft {
   chatHistory: ChatMessage[];
   /** AI generator job still running for this draft; resumed after a reload. */
   pendingJobId?: string;
+  /** The pending job was started elsewhere (e.g. from E2E findings): its edit always becomes a proposal. */
+  pendingReview?: boolean;
   /** Inputs for the AI analysis besides the PRD. */
   figmaLinks?: { title?: string; url: string }[];
   /** Names of supporting documents stored in the draft's AI workspace (docs/). */

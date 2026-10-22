@@ -266,6 +266,22 @@
       else if (draft?.scopePlan) chatMode = 'brainstorm';
     });
   });
+
+  // "Review di TAD" from another page (E2E findings) opens that draft's proposal right away.
+  $effect(() => {
+    const id = draft?.id;
+    const hasProposal = Boolean(draft?.proposal);
+    if (!id || !hasProposal) return;
+    untrack(() => {
+      try {
+        if (sessionStorage.getItem('tlc.tad.openReview') !== id) return;
+        sessionStorage.removeItem('tlc.tad.openReview');
+      } catch {
+        return;
+      }
+      reviewOpen = true;
+    });
+  });
 </script>
 
 <svelte:window onkeydown={onWorkspaceKeyDown} />

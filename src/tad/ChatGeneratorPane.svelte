@@ -12,6 +12,7 @@
   import { api } from '../lib/api-base';
   import { renderPreview } from '../lib/markdown/preview';
   import { drafts, type Draft } from './drafts.svelte';
+  import { finishGeneratorJob } from './job-delivery';
   import { ANALYSIS_PROMPT, BRAINSTORM_PROMPT, deleteDoc, fetchServicesInfo, grantAntigravityRead, servicesRootFor, startGeneratorJob, uploadDoc, withPdfPassword, type ServicesInfo } from './generator-client';
 
   let {
@@ -218,74 +219,12 @@
   }
 
   function finish(draftId: string, finished: GeneratorJob) {
-    const r = finished.result;
-    void aiUsage.load(true);
-    const sessions = { ...(drafts.drafts.find((d) => d.id === draftId)?.aiSessions ?? {}) };
-    if (finished.status === 'error' || r?.error) {
-      delete sessions[finished.ai.provider];
-    } else if (r?.sessionId) {
-      sessions[finished.ai.provider] = r.sessionId;
-    }
-    drafts.update(draftId, {
-      pendingJobId: undefined,
-      aiSessions: sessions,
+    // Shared with the E2E tab, which can deliver a TAD update it started (see job-delivery.ts).
+    finishGeneratorJob(draftId, finished, {
+      reviewMode,
+      onreview: () => draftId === draft.id && onreview(),
+      onscope: () => draftId === draft.id && onscope(),
     });
-    const who = finished.ai.provider === 'claude' ? 'Claude CLI' : finished.ai.provider === 'antigravity' ? 'Antigravity CLI' : finished.ai.provider === '9router' ? '9Router' : 'InferHub';
-    if (finished.status === 'cancelled') {
-      drafts.addChatMessage(draftId, { sender: 'system', text: 'Proses AI dibatalkan. TAD tidak diubah.' });
-      return;
-    }
-    if (finished.kind === 'brainstorm' && r?.scopeChanged && r.updatedScopeMarkdown) {
-      // The scope plan is a discussion document: updates land directly, the TAD stays untouched.
-      drafts.update(draftId, { scopePlan: r.updatedScopeMarkdown, scopeStatus: 'draft' });
-      drafts.addChatMessage(draftId, {
-        sender: 'assistant',
-        text: `${r.partial ? `${who} berhenti sebelum selesai: ${r.error}\n\n` : ''}${r.reply || 'Rencana scope diperbarui.'}`,
-        isError: r.partial,
-      });
-      toasts.show('Rencana scope diperbarui.', 'ok', 3000);
-      if (draftId === draft.id) onscope();
-      return;
-    }
-    if (finished.status === 'error' && r?.partial && r.updatedTadMarkdown) {
-      deliver(draftId, finished, r.updatedTadMarkdown, r.baseTadMarkdown, `${who} berhenti sebelum selesai: ${r.error}\n\nPerubahan yang sudah dibuat tetap disimpan. Periksa bagian akhir TAD, lalu minta AI melanjutkan bila perlu.`, true);
-      return;
-    }
-    if (finished.status === 'error' || !r) {
-      drafts.addChatMessage(draftId, { sender: 'assistant', text: `${who}: ${r?.error ?? 'gagal tanpa keterangan.'}`, isError: true });
-      toasts.show('Generator gagal. Lihat pesan di panel chat.', 'err');
-      return;
-    }
-    if (r.changed && r.updatedTadMarkdown) {
-      deliver(draftId, finished, r.updatedTadMarkdown, r.baseTadMarkdown, r.reply || 'TAD.md diperbarui.', false);
-      return;
-    }
-    drafts.addChatMessage(draftId, { sender: 'assistant', text: r.reply || '(AI tidak memberi balasan teks.)' });
-  }
-
-  /** In review mode the edit becomes a proposal; otherwise it is applied right away as a revision. */
-  function deliver(draftId: string, finished: GeneratorJob, proposed: string, base: string | undefined, text: string, partial: boolean) {
-    const d = drafts.drafts.find((x) => x.id === draftId);
-    if (!d) return;
-    if (reviewMode) {
-      const existingProposal = d.proposal;
-      const proposal = drafts.setProposal(draftId, {
-        provider: finished.ai.provider,
-        prompt: finished.prompt,
-        reply: text,
-        base: existingProposal?.base ?? base ?? d.markdown,
-        proposed,
-        partial,
-      });
-      drafts.addChatMessage(draftId, { sender: 'assistant', text: `${text}\n\nUsulan perubahan menunggu review sebelum masuk ke TAD.`, isError: partial, proposalId: proposal?.id });
-      toasts.show('Usulan AI siap direview.', 'info', 4000);
-      if (draftId === draft.id) onreview();
-      return;
-    }
-    const who = finished.ai.provider === 'claude' ? 'Claude' : finished.ai.provider === 'antigravity' ? 'Antigravity' : finished.ai.provider === '9router' ? '9Router' : 'InferHub';
-    const revisionId = drafts.applyRevision(draftId, proposed, `AI (${who}${partial ? ', sebagian' : ''}): ${finished.prompt.slice(0, 40)}`)?.id;
-    drafts.addChatMessage(draftId, { sender: 'assistant', text, isError: partial, revisionId });
-    toasts.show(partial ? 'AI berhenti sebelum selesai; hasil sebagian diterapkan.' : 'TAD diperbarui oleh AI.', partial ? 'info' : 'ok', 4000);
   }
 
   // Attachments --------------------------------------------------------------------------
