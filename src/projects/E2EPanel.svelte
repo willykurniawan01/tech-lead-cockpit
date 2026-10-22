@@ -7,9 +7,14 @@
   import { loadAiSelection } from '../lib/ai/providers.svelte';
   import type { AiSelection } from '../lib/ai/types';
   import { qa, runReport } from '../lib/qa/client';
+  import Modal from '../components/Modal.svelte';
+  import AgentRunsPanel from '../coder/AgentRunsPanel.svelte';
+  import { coder, suggestRepo } from '../lib/coder/client';
+  import type { CoderProfileId, CoderRun, CoderRunStatus } from '../lib/coder/types';
+  import { buildCodeFixSpec, codeFixTitle, e2eDraftId, failedStep, failingService } from '../lib/qa/code-fix';
   import { latestResults, resultBucket, resultCounts, type LatestResult, type ResultBucket } from '../lib/qa/latest';
   import { addGroup, cleanGroupName, edgeOfGroup, groupCheck, groupFlows, groupOrder, moveFlowInGroup, moveFlowToGroup, moveGroup, removeGroup, renameGroup, setGroupEnabled, UNGROUPED_LABEL, withGroups } from '../lib/qa/groups';
-  import { QA_CATEGORIES, QA_CATEGORY_LABELS, type QACategory, type QAEnvironment, type QAFlow, type QAGenerateJob, type QAGenerateRequest, type QAPipeline, type QAPlan, type QARun, type QASuspect, type QAStepResult, type QAStepStatus, type QASuite } from '../lib/qa/types';
+  import { QA_CATEGORIES, QA_CATEGORY_LABELS, type QACategory, type QAEnvironment, type QAFlow, type QAFlowResult, type QAGenerateJob, type QAGenerateRequest, type QAPipeline, type QAPlan, type QARun, type QASuspect, type QAStepResult, type QAStepStatus, type QASuite } from '../lib/qa/types';
   import type { EstimateProject } from '../lib/estimate/types';
   import type { Draft } from '../tad/drafts.svelte';
   import E2EEnvironmentModal from './E2EEnvironmentModal.svelte';
@@ -123,6 +128,101 @@
   ];
   const shortTime = (iso: string) => new Date(iso).toLocaleString('id-ID', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
   const resultTitle = (r: LatestResult) => `Hasil run terakhir: ${STATUS[r.status].label} · ${new Date(r.at).toLocaleString('id-ID')} · ${r.envName}. Klik untuk membuka run ini.`;
+  // "Perbaiki kode": a bug-fix coder run from a failed test, in the background (Agent Tasks), no ticket.
+  const fixDraft = $derived({ id: e2eDraftId(project.id), markdown: '' } as unknown as Draft);
+  let coderRuns = $state<CoderRun[]>([]);
+  let coderKey = $state(0);
+  const CODER_ACTIVE: CoderRunStatus[] = ['queued', 'preparing', 'running', 'testing'];
+  const CODER_LABEL: Partial<Record<CoderRunStatus, string>> = { queued: 'antre', preparing: 'menyiapkan', running: 'agent bekerja', testing: 'menjalankan test', 'needs-input': 'butuh jawaban', ready: 'siap direview', pushed: 'di-push', completed: 'selesai', failed: 'gagal', cancelled: 'dibatalkan' };
+  /** Newest fix run per flow of this project. */
+  const fixByFlow = $derived.by(() => {
+    const m = new Map<string, CoderRun>();
+    for (const r of [...coderRuns].sort((a, b) => b.createdAt.localeCompare(a.createdAt))) {
+      if (r.source?.kind === 'e2e' && r.source.projectId === project.id && !m.has(r.source.flowId)) m.set(r.source.flowId, r);
+    }
+    return m;
+  });
+  const anyFixActive = $derived([...fixByFlow.values()].some((r) => CODER_ACTIVE.includes(r.status)));
+  async function loadCoderRuns() {
+    coderRuns = (await coder.state().catch(() => null))?.runs.filter((r) => r.draftId === e2eDraftId(project.id)) ?? coderRuns;
+  }
+  $effect(() => {
+    void project.id;
+    untrack(() => void loadCoderRuns());
+  });
+  // While a fix is running in the background, keep its status on the cards current.
+  $effect(() => {
+    if (!anyFixActive) return;
+    const t = setInterval(() => void loadCoderRuns(), 5_000);
+    return () => clearInterval(t);
+  });
+
+  let fixTarget = $state<{ flow: QAFlow; result: QAFlowResult; run: QARun } | null>(null);
+  let fixOpenModal = $state(false);
+  let fixRepos = $state<string[]>([]);
+  let fixRepo = $state('');
+  let fixProfile = $state<CoderProfileId>('backend');
+  let fixBase = $state('');
+  let fixNote = $state('');
+  let fixStarting = $state(false);
+  const fixSpec = $derived(
+    fixTarget && fixRepo
+      ? buildCodeFixSpec({
+          flow: fixTarget.flow,
+          result: fixTarget.result,
+          projectName: project.name,
+          envName: fixTarget.run.environment.name,
+          runAt: new Date(fixTarget.run.startedAt).toLocaleString('id-ID'),
+          repo: fixRepo,
+          taskSpecs: tasks.filter((t) => fixTarget!.flow.taskTitles.includes(t.title)).map((t) => ({ title: t.title, spec: t.spec })),
+          note: fixNote,
+        })
+      : '',
+  );
+
+  /** Opens the "Perbaiki kode" dialog for a flow's failure in a run (default: its latest failure). */
+  async function openCodeFix(flowId: string, runId?: string) {
+    const flow = suite?.flows.find((f) => f.id === flowId);
+    const run = runs.find((r) => r.id === (runId ?? latest.get(flowId)?.runId));
+    const result = run?.flows.find((f) => f.flowId === flowId);
+    if (!flow || !run || !result) return toasts.show('Hasil run yang gagal untuk test case ini tidak ditemukan.', 'err');
+    fixTarget = { flow, result, run };
+    fixNote = '';
+    fixOpenModal = true;
+    fixRepos = await coder.repos().catch(() => []);
+    fixRepo = suggestRepo(fixRepos, failingService(flow, result)) || fixRepo;
+    fixProfile = 'backend';
+  }
+
+  async function startCodeFix() {
+    if (!fixTarget || !fixRepo || !fixSpec) return;
+    fixStarting = true;
+    try {
+      const { flow, run } = fixTarget;
+      await coder.start([
+        {
+          draftId: e2eDraftId(project.id),
+          tadTitle: `E2E: ${project.name}`,
+          taskTitle: codeFixTitle(flow, fixRepo),
+          profile: fixProfile,
+          repo: fixRepo,
+          ...(fixBase.trim() ? { baseBranch: fixBase.trim() } : {}),
+          spec: fixSpec,
+          kind: 'bugfix',
+          source: { kind: 'e2e', projectId: project.id, flowId: flow.id, flowName: flow.name, qaRunId: run.id },
+        },
+      ]);
+      fixOpenModal = false;
+      toasts.show(`Coder agent memperbaiki ${fixRepo} di background. Pantau di panel Perbaikan kode atau Agent Tasks.`, 'ok', 6000);
+      await loadCoderRuns();
+      coderKey++;
+    } catch (e) {
+      toasts.show((e as Error).message, 'err', 8000);
+    } finally {
+      fixStarting = false;
+    }
+  }
+
   function openResult(r: LatestResult) {
     tab = 'results';
     void showRun(r.runId);
@@ -672,6 +772,13 @@
 
   <E2EPipeline projectId={project.id} bind:plan bind:pipeline existingFlows={suite?.flows.length ?? 0} onsuite={reloadSuite} />
 
+  {#if coderRuns.length}
+    <section class="code-fixes" id="e2e-code-fixes">
+      <h3 class="small"><Icon name="code" size={13} /> Perbaikan kode dari test yang gagal</h3>
+      <AgentRunsPanel draft={fixDraft} refreshKey={coderKey} />
+    </section>
+  {/if}
+
   <div class="tabs">
     <button class:active={tab === 'flows'} onclick={() => (tab = 'flows')}>Skenario ({suite?.flows.length ?? 0})</button>
     <button class:active={tab === 'results'} onclick={() => (tab = 'results')}>Hasil Run {#if runs.length}({runs.length}){/if}</button>
@@ -823,6 +930,10 @@
               {#if running && (lastStatus[flow.id] === 'running' || lastStatus[flow.id] === 'pending')}
                 <span class="badge {STATUS[lastStatus[flow.id]].cls}">{STATUS[lastStatus[flow.id]].label}</span>
               {/if}
+              {#if fixByFlow.get(flow.id)}
+                {@const fx = fixByFlow.get(flow.id)!}
+                <button class="badge fix-badge" class:st-run={CODER_ACTIVE.includes(fx.status)} class:st-ok={fx.status === 'ready' || fx.status === 'pushed' || fx.status === 'completed'} class:st-warn={fx.status === 'needs-input'} class:st-err={fx.status === 'failed'} onclick={() => document.getElementById('e2e-code-fixes')?.scrollIntoView({ behavior: 'smooth', block: 'start' })} title="Perbaikan kode oleh coder agent ({fx.repo} · {fx.branch}). Klik untuk ke panel Perbaikan kode."><Icon name="code" size={11} /> Perbaikan kode: {CODER_LABEL[fx.status] ?? fx.status}</button>
+              {/if}
               {#if res}
                 <button class="badge result-badge {STATUS[res.status].cls}" onclick={() => openResult(res)} title={resultTitle(res)}>
                   <Icon name={STATUS[res.status].icon} size={11} /> {STATUS[res.status].label} · {shortTime(res.at)}
@@ -847,6 +958,9 @@
               <button class="btn btn-ghost btn-sm order-btn" onclick={() => moveFlow(flow, 1)} disabled={edge.last} title="Turunkan di dalam grup (urutan journey)" aria-label="Turunkan">↓</button>
               <button class="btn btn-ghost btn-sm" onclick={() => run([flow.id])} disabled={running || starting} title="Jalankan flow ini saja"><Icon name="play" size={13} /></button>
               <button class="btn btn-ghost btn-sm" onclick={() => openFix(flow.id)} disabled={pipelineBusy} title="Perbaiki test case ini dengan AI"><Icon name="sparkles" size={13} /></button>
+              {#if resultBucket(res) === 'failed'}
+                <button class="btn btn-ghost btn-sm fix-code-btn" onclick={() => openCodeFix(flow.id)} disabled={CODER_ACTIVE.includes(fixByFlow.get(flow.id)?.status ?? 'cancelled')} title="Perbaiki kode service dari kegagalan ini (coder agent di background, tanpa tiket)" aria-label="Perbaiki kode"><Icon name="code" size={13} /></button>
+              {/if}
               <button class="btn btn-ghost btn-sm" onclick={() => startEdit(flow)} title="Edit test case"><Icon name="edit" size={13} /></button>
               <button class="btn btn-ghost btn-sm" onclick={() => removeFlow(flow)} title="Hapus flow"><Icon name="trash" size={13} /></button>
               </span>
@@ -976,6 +1090,10 @@
               <span class="badge {STATUS[flow.status].cls}"><Icon name={STATUS[flow.status].icon} size={11} /> {STATUS[flow.status].label}</span>
               <strong>{flow.name}</strong>
               <span class="chip">{QA_CATEGORY_LABELS[flow.category]}</span>
+              {#if ['failed', 'error', 'blocked'].includes(flow.status) && activeRun.status !== 'running' && suite?.flows.some((f) => f.id === flow.flowId)}
+                <span class="grow"></span>
+                <button class="btn btn-sm" onclick={() => activeRun && openCodeFix(flow.flowId, activeRun.id)} disabled={CODER_ACTIVE.includes(fixByFlow.get(flow.flowId)?.status ?? 'cancelled')} title="Coder agent memperbaiki kode service dari kegagalan ini, di background, tanpa tiket"><Icon name="code" size={13} /> Perbaiki kode</button>
+              {/if}
             </div>
             <ol class="steps">
               {#each flow.steps as s, si (si)}
@@ -1037,6 +1155,54 @@
     <button class="btn btn-ghost btn-sm" type="button" onclick={() => (newGroupOpen = false)}>Batal</button>
   </form>
 {/snippet}
+
+<Modal bind:open={fixOpenModal} title="Perbaiki kode dari test yang gagal" subtitle={fixTarget?.flow.name} width={760}>
+  {#if fixTarget}
+    {@const st = failedStep(fixTarget.result)}
+    <div class="fix-form">
+      <p class="small fix-summary">
+        <span class="badge st-err">{STATUS[fixTarget.result.status].label}</span>
+        {#if st}Step <strong>{st.name}</strong>{st.response ? ` · HTTP ${st.response.status}` : ''}{st.assertions.find((a) => !a.passed) ? ` · ${st.assertions.find((a) => !a.passed)!.message}` : st.error ? ` · ${st.error}` : ''}{/if}
+        <span class="muted"> · run {new Date(fixTarget.run.startedAt).toLocaleString('id-ID')} · {fixTarget.run.environment.name}</span>
+      </p>
+      <div class="fix-grid">
+        <label class="field">
+          <span>Repo yang diperbaiki</span>
+          <select class="input" bind:value={fixRepo}>
+            {#if !fixRepos.length}<option value="">Memuat repo…</option>{/if}
+            {#each fixRepos as r (r)}<option value={r}>{r}</option>{/each}
+          </select>
+        </label>
+        <label class="field">
+          <span>Profil</span>
+          <select class="input" bind:value={fixProfile}>
+            <option value="backend">Backend</option>
+            <option value="frontend">Frontend</option>
+          </select>
+        </label>
+        <label class="field">
+          <span>Base branch <em class="muted">(kosong = default)</em></span>
+          <input class="input mono" bind:value={fixBase} placeholder="staging" />
+        </label>
+      </div>
+      <label class="field">
+        <span>Catatan untuk agent <em class="muted">(opsional)</em></span>
+        <textarea class="input" rows="3" bind:value={fixNote} placeholder="mis. validasi tanggal seharusnya pakai zona Asia/Jakarta"></textarea>
+      </label>
+      <details class="small">
+        <summary>Spesifikasi yang dikirim ke agent</summary>
+        <pre class="mono spec-preview">{fixSpec}</pre>
+      </details>
+      <p class="muted small">
+        Coder agent bekerja di background di clone terisolasi repo ini (branch <code>fix/…</code>): memastikan dulu kegagalannya di kode, menulis test reproduksi, lalu memperbaiki. Tidak ada tiket Jira atau kasus bug yang dibuat. Bila ternyata test-nya yang keliru, agent berhenti dengan pertanyaan. Pakai <strong>Perbaiki dengan AI</strong> untuk memperbaiki test case. Hasilnya direview di panel Perbaikan kode (diff, lalu Push & MR Draft), juga terlihat di Agent Tasks.
+      </p>
+    </div>
+  {/if}
+  {#snippet footer()}
+    <button class="btn btn-ghost" onclick={() => (fixOpenModal = false)}>Batal</button>
+    <button class="btn btn-primary" onclick={startCodeFix} disabled={!fixRepo || !fixSpec || fixStarting}><Icon name="play" size={13} /> {fixStarting ? 'Memulai…' : 'Jalankan di background'}</button>
+  {/snippet}
+</Modal>
 
 <E2ELogViewer bind:open={logOpen} bind:runId={logRunId} {runs} />
 <E2EEnvironmentModal bind:open={envModalOpen} bind:environments bind:selectedId={envId} {services} />
@@ -1201,6 +1367,55 @@
   .empty-actions {
     display: flex;
     gap: 8px;
+  }
+  /* "Perbaiki kode": the runs panel, the badge on a card, and the dialog. */
+  .code-fixes {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    scroll-margin-top: 80px;
+  }
+  .code-fixes h3 {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin: 0;
+  }
+  .fix-badge {
+    cursor: pointer;
+    border: none;
+    font: inherit;
+    font-size: 11px;
+  }
+  .fix-code-btn {
+    color: var(--err);
+  }
+  .fix-form {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+  .fix-summary {
+    margin: 0;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px;
+  }
+  .fix-grid {
+    display: grid;
+    grid-template-columns: 2fr 1fr 1fr;
+    gap: 10px;
+  }
+  .spec-preview {
+    max-height: 320px;
+    overflow: auto;
+    white-space: pre-wrap;
+    font-size: 11.5px;
+    padding: 10px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--surface-2);
   }
   /* Latest outcome: filter chips, per-group counts, and the badge on each card (opens that run). */
   .result-filter {

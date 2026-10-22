@@ -206,6 +206,15 @@ export function commandPrefix(command: string): string {
   return command.replace(/\s+(\.\/\.\.\.|-q)$/, '');
 }
 
+/** A run's origin from the request, as plain short strings (it is only shown and matched on). */
+export function runSource(raw: unknown): CoderRun['source'] {
+  const r = raw as Record<string, unknown> | undefined;
+  if (!r || r.kind !== 'e2e') return undefined;
+  const s = (v: unknown, max: number) => (typeof v === 'string' ? v.slice(0, max) : '');
+  const source = { kind: 'e2e' as const, projectId: s(r.projectId, 100), flowId: s(r.flowId, 100), flowName: s(r.flowName, 300), qaRunId: s(r.qaRunId, 120) };
+  return source.projectId && source.flowId ? source : undefined;
+}
+
 export function branchName(jiraKey: string | undefined, title: string, prefix: 'feature' | 'fix' = 'feature'): string {
   const name = title.replace(/^\[[^\]]*\](\[[^\]]*\])*\s*-?\s*/, '');
   const slug = name
@@ -484,6 +493,7 @@ export class CoderRuns {
         targetBranch,
         branch: branchName(req.jiraKey, req.taskTitle, req.kind === 'bugfix' ? 'fix' : 'feature'),
         ...(req.kind === 'bugfix' ? { kind: 'bugfix' as const } : {}),
+        ...(runSource(req.source) ? { source: runSource(req.source) } : {}),
         worktree: join(this.dir, 'work', id),
         spec: req.spec.slice(0, 40_000),
         status: 'queued',

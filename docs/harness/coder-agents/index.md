@@ -82,6 +82,10 @@ Diatur dalam [`connector/coder-runs.ts`](file:///Users/ridwan/mine/tech-lead-coc
 
 Hanya **Claude CLI** dan **Antigravity CLI** (`CODER_PROVIDERS`, `canCode` di [`connector/coder-runs.ts`](../../../connector/coder-runs.ts)). InferHub dan 9Router memakai loop tool dokumen di [`connector/openai-tool-runner.ts`](../../../connector/openai-tool-runner.ts). Loop itu dibuat untuk generator TAD: system prompt-nya tentang TAD, `write_file` hanya boleh menulis Markdown, dan ada fallback yang menulis `TAD.md`. Jadi task coding di sana tidak bisa membuat file kode, dan bisa berakhir menulis `TAD.md` (kasus MU-2509). Karena itu provider API ditolak saat profil disimpan (`updateSettings`), saat run dimulai (`start`), dan saat run lama dilanjutkan/direvisi. Picker AI di profil hanya menawarkan Claude/Antigravity (`AiPicker` prop `only`). AI Review di modal diff tetap boleh memakai provider apa pun karena hanya membaca.
 
+### 3b. Run dari test E2E yang gagal (`source`)
+
+`StartCoderRunRequest.source` / `CoderRun.source` (`{ kind: 'e2e', projectId, flowId, flowName, qaRunId }`, disaring `runSource` di [`connector/coder-runs.ts`](../../../connector/coder-runs.ts)) menandai run bugfix yang dimulai dari tombol **Perbaiki kode** di tab E2E (lihat [QA Automation](../qa-automation/index.md)). Run ini memakai `draftId` `e2e-<projectId>`, tanpa Jira key. Agent Tasks membukanya di tab E2E proyek, sama seperti `bug-<caseId>` dibuka di Bug Tracing.
+
 ### 4. Tidak ada perubahan ≠ mengarang perubahan
 
 Prompt awal dan setiap revisi memuat `NO_FAKE_CHANGES`: agent dilarang membuat file lain (dokumentasi, `TAD.md`, README, test kosong) hanya supaya ada diff. Bila spesifikasi sudah terpenuhi, agent menulis `SUDAH TERPENUHI:` beserta bukti file:baris. Run tanpa perubahan tetap gagal, tapi pesannya membedakan "agent menilai task sudah terpenuhi di branch base" dari "tidak mengubah apa pun", dan menyarankan tandai selesai atau revisi dengan instruksi yang spesifik. Checkout branch memakai `-B`, sehingga retry di folder kerja yang sama tidak gagal dengan "a branch named … already exists".

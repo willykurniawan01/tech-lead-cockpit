@@ -72,13 +72,18 @@
 
   /**
    * Opens where a run's diff, push and revise live: a bug fix in its Bug Tracing case (draft id
-   * `bug-<caseId>`), a TAD task on the Task Board of the TAD's project.
+   * `bug-<caseId>`), a fix from a failed E2E test in the project's E2E tab (`e2e-<projectId>`),
+   * a TAD task on the Task Board of the TAD's project.
    */
   function openTaskBoard(t: AgentTask) {
     const draftId = t.links?.draftId;
     if (!draftId) return;
     if (draftId.startsWith('bug-')) {
       location.hash = `#/bugs/${encodeURIComponent(draftId.slice(4))}`;
+      return;
+    }
+    if (draftId.startsWith('e2e-')) {
+      location.hash = `#/projects/${encodeURIComponent(draftId.slice(4))}?tab=e2e`;
       return;
     }
     const id = encodeURIComponent(draftId);
@@ -357,7 +362,7 @@
             {:else}
             <div class="actions">
               {#if t.links?.draftId}
-                <button class="btn btn-sm btn-primary" onclick={() => openTaskBoard(t)}><Icon name="eye" size={14} /> Diff, push & revisi di Task Board</button>
+                <button class="btn btn-sm btn-primary" onclick={() => openTaskBoard(t)}><Icon name="eye" size={14} /> Diff, push & revisi di {t.links.draftId.startsWith('e2e-') ? 'E2E Test' : t.links.draftId.startsWith('bug-') ? 'Bug Tracing' : 'Task Board'}</button>
               {/if}
               {#if t.links?.mrUrl}
                 <a class="btn btn-sm" href={t.links.mrUrl} target="_blank" rel="noreferrer"><Icon name="external" size={14} /> Halaman MR baru</a>

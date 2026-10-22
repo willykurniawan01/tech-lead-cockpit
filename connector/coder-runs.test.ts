@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { StartCoderRunRequest } from '../src/lib/coder/types.ts';
-import { agentPrompt, branchName, canCode, CoderRuns, commandPrefix, DEFAULT_PROFILES, detectTestCommands, newMrUrl, NO_FAKE_CHANGES, repoFileMap, webUrlOf, type CoderJira } from './coder-runs.ts';
+import { agentPrompt, branchName, canCode, CoderRuns, commandPrefix, DEFAULT_PROFILES, detectTestCommands, newMrUrl, NO_FAKE_CHANGES, repoFileMap, runSource, webUrlOf, type CoderJira } from './coder-runs.ts';
 
 const sh = (cwd: string, ...args: string[]) => execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
 
@@ -168,6 +168,19 @@ describe('CoderRuns', () => {
     expect(state.runs[0].id).toBe(run.id);
     const reloaded = new CoderRuns({ dataDir: join(tmp, 'coder'), servicesRoot: async () => services, runAi: () => ({ cancel() {}, done: Promise.resolve({ reply: '' }) }) });
     expect((await reloaded.list()).runs[0].status).toBe('failed');
+  });
+
+  it('keeps where a fix run came from (a failed E2E test), as plain short strings', async () => {
+    expect(runSource({ kind: 'e2e', projectId: 'p1', flowId: 'f1', flowName: 'Reserve', qaRunId: 'r1', extra: 1 })).toEqual({ kind: 'e2e', projectId: 'p1', flowId: 'f1', flowName: 'Reserve', qaRunId: 'r1' });
+    expect(runSource({ kind: 'other', projectId: 'p1', flowId: 'f1' })).toBeUndefined();
+    expect(runSource({ kind: 'e2e', projectId: 'p1' })).toBeUndefined();
+    const { runs } = manager();
+    const [run] = await runs.start([{ ...req('svc-a', 'E2E gagal: Reserve'), kind: 'bugfix', source: { kind: 'e2e', projectId: 'p1', flowId: 'f1', flowName: 'Reserve', qaRunId: 'r1' } }]);
+    expect(run.source).toEqual({ kind: 'e2e', projectId: 'p1', flowId: 'f1', flowName: 'Reserve', qaRunId: 'r1' });
+    // No Jira key: the branch is fix/agent-…, nothing on Jira moves.
+    expect(run.branch).toBe('fix/agent-e2e-gagal-reserve');
+    await until(() => ['ready', 'failed'].includes(runs.get(run.id)!.status));
+    expect(jiraLog).toEqual([]);
   });
 
   it('rejects repos outside the Services folder', async () => {

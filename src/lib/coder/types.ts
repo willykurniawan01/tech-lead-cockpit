@@ -31,6 +31,18 @@ export interface StartCoderRunRequest {
   spec: string;
   /** A TAD task (default) or a bug fix from Bug Tracing (fix/ branch, test-first prompt). */
   kind?: 'task' | 'bugfix';
+  /** Where the run was started from when not a TAD task, e.g. a failed E2E test case. */
+  source?: CoderRunSource;
+}
+
+/** A bug fix started from a failed E2E test case ("Perbaiki kode"), no ticket involved. */
+export interface CoderRunSource {
+  kind: 'e2e';
+  projectId: string;
+  flowId: string;
+  flowName: string;
+  /** The E2E run whose failure the fix starts from. */
+  qaRunId: string;
 }
 
 export type CoderRunStatus = 'queued' | 'preparing' | 'running' | 'testing' | 'needs-input' | 'ready' | 'pushed' | 'completed' | 'failed' | 'cancelled';
@@ -69,6 +81,7 @@ export interface CoderRun {
   worktree: string;
   spec: string;
   kind?: 'task' | 'bugfix';
+  source?: CoderRunSource;
   status: CoderRunStatus;
   createdAt: string;
   startedAt?: string;
