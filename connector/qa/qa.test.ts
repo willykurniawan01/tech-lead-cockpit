@@ -7,7 +7,7 @@ import type { QAEnvironment, QAFlow } from '../../src/lib/qa/types.ts';
 import { buildQaPrompt, dedupeStepIds, extractJson, normalizeEditedFlow, parseQaReply, repairJson } from './generator.ts';
 import { parseFix } from './plan.ts';
 import { QaManager, validateEnvironment } from './manager.ts';
-import { checkAssertion, interpolate, jsonPath, runFlow } from './runner.ts';
+import { checkAssertion, declaredTypes, interpolate, jsonPath, runFlow } from './runner.ts';
 
 const env: QAEnvironment = {
   id: 'dev',
@@ -109,6 +109,27 @@ describe('runner helpers', () => {
 });
 
 describe('runFlow', () => {
+  it('sends the same payload alone as in a full run: the suite\'s declared type wins', async () => {
+    const step = (id: string, userId: string) => ({ id, name: id, request: { method: 'POST' as const, path: '/cms/promo', body: { actor: { user_id: userId } } }, assertions: [{ type: 'status' as const, op: 'equals' as const, expected: 400 }] });
+    // Elsewhere the suite casts the variable to string; this flow forgot the cast.
+    const typed: QAFlow = { ...loginThenOrder, id: 'typed', steps: [step('a', '{{actorCreator|string}}')] };
+    const untyped: QAFlow = { ...loginThenOrder, id: 'gap', variables: { actorCreator: '1024' }, steps: [step('b', '{{actorCreator}}')] };
+    const declared = declaredTypes([typed, untyped]);
+    expect(declared).toEqual({ actorCreator: 'string' });
+    const { f, calls } = fakeFetch(() => ({ status: 400, body: {} }));
+    // Alone: no earlier flow extracted it, the declared type still applies ("1024", not 1024).
+    await runFlow(untyped, 0, { env, fetch: f, declared });
+    // In a run where an earlier flow extracted it as a number, the declared type still wins.
+    await runFlow(untyped, 1, { env, fetch: f, declared, carried: { values: { actorCreator: '1024' }, from: { actorCreator: 'x' }, types: { actorCreator: 'number' } } });
+    expect(calls.map((c) => JSON.parse(c.body!).actor.user_id)).toEqual(['1024', '1024']);
+    // Without a declaration the old guess stays (a number look-alike becomes a number).
+    await runFlow(untyped, 2, { env, fetch: f });
+    expect(JSON.parse(calls[2].body!).actor.user_id).toBe(1024);
+    // Cast to two different types somewhere: no single answer, nothing declared.
+    expect(declaredTypes([typed, { ...typed, id: 'n', steps: [step('c', '{{actorCreator|number}}')] }])).toEqual({});
+  });
+
+
   it('chains extracted values across services and masks secrets', async () => {
     const { f, calls } = fakeFetch((c) => {
       if (c.url.endsWith('/auth/login')) return { status: 200, body: { data: { accessToken: 'tok-abcdef123' } } };

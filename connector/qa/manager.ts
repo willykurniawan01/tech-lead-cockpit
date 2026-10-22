@@ -10,7 +10,7 @@ import { buildQaPrompt, dedupeStepIds, parseQaReply, QA_SYSTEM_PROMPT } from './
 import { arrangeFlows, groupOrder } from '../../src/lib/qa/groups.ts';
 import { buildFixPrompt, buildPlanPrompt, buildRepairPrompt, checkFlowsAgainstPlan, evidenceMentions, FIX_SYSTEM_PROMPT, parseFix, parsePlan, parseRepair, PLAN_SYSTEM_PROMPT, REPAIR_SYSTEM_PROMPT } from './plan.ts';
 import { verifyEvidence } from '../trace/verify.ts';
-import { runFlow, summarize } from './runner.ts';
+import { declaredTypes, runFlow, summarize } from './runner.ts';
 import { DATA_DIR } from '../paths.ts';
 
 /**
@@ -983,6 +983,8 @@ export class QaManager {
     void (async () => {
       // One journey: values extracted by a flow are available to the next ones.
       const carried = { values: {} as Record<string, string>, from: {} as Record<string, string> };
+      // From the whole suite, not just the flows picked: running one flow alone casts like a full run.
+      const declared = declaredTypes(suite.flows);
       for (const [i, flow] of flows.entries()) {
         if (state.cancelled) {
           run.flows[i].status = 'skipped';
@@ -996,6 +998,7 @@ export class QaManager {
           fetch: this.deps.fetch,
           query: env.databases?.length ? this.dbQuery(env) : undefined,
           carried,
+          declared,
           cancelled: () => state.cancelled,
           onStep: (fi, step) => {
             run.flows[fi].steps.push(step);

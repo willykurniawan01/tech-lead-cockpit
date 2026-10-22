@@ -76,8 +76,9 @@ Test case hanya selengkap input-nya. Tiga aturan ini mencegah journey kehilangan
 Runner ([`connector/qa/runner.ts`](../../../connector/qa/runner.ts)) menentukan tipe JSON nilai yang isinya tepat satu variabel (`"field": "{{x}}"`):
 
 1. **Cast eksplisit** menang: `"{{x|string}}"`, `"{{x|number}}"`, `"{{x|boolean}}"`, `"{{x|json}}"`. Di dalam teks (`"kode {{x|string}}"`) cast diabaikan.
-2. **Hasil `extract`** memakai tipe aslinya dari response (`"00123"` tetap string, `77` tetap number, objek tetap objek), juga saat dibawa ke flow berikutnya (`carried.types`).
-3. **Tanpa keduanya**, hanya angka aman yang dikirim sebagai number: tanpa nol di depan dan maksimal 15 digit. Nomor HP `0812…` dan nomor rekening panjang tetap string. Dulu semua string berisi angka diubah jadi number, dan `0812…` membuat step crash.
+2. **Tipe yang dideklarasikan suite** (`declaredTypes`): bila variabel itu di-cast di step mana pun dalam suite (`{{actorCreator|string}}`), pemakaian tanpa cast ikut tipe itu. Ini berlaku juga saat flow dijalankan sendiri, karena deklarasi dihitung dari seluruh suite, bukan hanya flow yang dipilih. Variabel yang di-cast ke dua tipe berbeda tidak dideklarasikan. Aturan ini menang atas tipe hasil `extract` flow sebelumnya. Tanpa aturan ini hasil tergantung urutan run: jalan sendiri, `"{{actorCreator}}"` berisi `1024` dikirim sebagai number dan service menolak karena tipe salah (test negatif "lulus" palsu); jalan bersama, flow pertama sudah meng-extract `created_by` sebagai string.
+3. **Hasil `extract`** memakai tipe aslinya dari response (`"00123"` tetap string, `77` tetap number, objek tetap objek), juga saat dibawa ke flow berikutnya (`carried.types`).
+4. **Tanpa ketiganya**, hanya angka aman yang dikirim sebagai number: tanpa nol di depan dan maksimal 15 digit. Nomor HP `0812…` dan nomor rekening panjang tetap string. Dulu semua string berisi angka diubah jadi number, dan `0812…` membuat step crash.
 
 Prompt penulis, perbaikan, dan repair meminta AI menulis cast sesuai tipe di struct request.
 

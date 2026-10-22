@@ -42,6 +42,12 @@ export interface RunContext {
    * reserve…), with the flow that produced each and the JSON type it had. Shared and updated across flows.
    */
   carried?: { values: Record<string, string>; from: Record<string, string>; types?: Record<string, VarType> };
+  /**
+   * Types the suite declares for its variables (`{{name|string}}` anywhere, see declaredTypes). They
+   * beat the type a value happened to have when an earlier flow extracted it, so a flow gets the same
+   * payload alone as in a full run.
+   */
+  declared?: Record<string, VarType>;
 }
 
 const BUILTINS: Record<string, () => string> = {
@@ -64,6 +70,25 @@ export function interpolate(value: string, vars: Record<string, string>, missing
     missing?.add(name);
     return whole;
   });
+}
+
+/**
+ * The type each variable is cast to across the suite (`{{actorId|string}}` in any step's path,
+ * header, query or body). A name cast to different types is left out: there is no single answer.
+ */
+export function declaredTypes(flows: QAFlow[]): Record<string, VarType> {
+  const seen = new Map<string, Set<string>>();
+  const visit = (v: unknown) => {
+    if (typeof v === 'string') {
+      for (const [, name, type] of v.matchAll(/\{\{\s*([$\w.-]+)\s*\|\s*(\w+)\s*\}\}/g)) {
+        if (!VAR_TYPES.has(type)) continue;
+        seen.set(name, (seen.get(name) ?? new Set()).add(type));
+      }
+    } else if (Array.isArray(v)) v.forEach(visit);
+    else if (v && typeof v === 'object') Object.values(v).forEach(visit);
+  };
+  for (const f of flows) for (const st of f.steps) visit([st.request.path, st.request.headers, st.request.query, st.request.body]);
+  return Object.fromEntries([...seen].filter(([, t]) => t.size === 1).map(([name, t]) => [name, [...t][0] as VarType]));
 }
 
 /** A lone variable's value as JSON: its cast, else its extracted type, else only a safe number/boolean look-alike. */
@@ -385,8 +410,10 @@ export async function runFlow(flow: QAFlow, flowIndex: number, ctx: RunContext):
   for (const [k, v] of Object.entries({ ...(flow.variables ?? {}), ...ctx.env.variables })) vars[k] = interpolate(v, vars);
   // Data created earlier in the run beats sample values; test credentials still win.
   Object.assign(vars, ctx.carried?.values ?? {}, secretVars);
-  // Extracted values keep their JSON type; a test credential is whatever the step's cast says.
-  const types: Record<string, VarType> = { ...(ctx.carried?.types ?? {}) };
+  // Extracted values keep their JSON type, unless the suite declares one (same payload alone or in
+  // a full run); a test credential is whatever the step's cast says.
+  const declared = ctx.declared ?? {};
+  const types: Record<string, VarType> = { ...(ctx.carried?.types ?? {}), ...declared };
   for (const k of Object.keys(secretVars)) delete types[k];
   const steps: QAStepResult[] = [];
   let stopped: string | undefined;
@@ -418,7 +445,7 @@ export async function runFlow(flow: QAFlow, flowIndex: number, ctx: RunContext):
     }
     const { result, extracted, extractedTypes } = await runStep(step, vars, types, ctx, secrets);
     Object.assign(vars, extracted);
-    Object.assign(types, extractedTypes);
+    Object.assign(types, extractedTypes, Object.fromEntries(Object.entries(declared).filter(([k]) => k in extractedTypes)));
     if (ctx.carried) {
       ctx.carried.types ??= {};
       for (const [k, v] of Object.entries(extracted)) (ctx.carried.values[k] = v), (ctx.carried.from[k] = flow.name), (ctx.carried.types[k] = extractedTypes[k]);
