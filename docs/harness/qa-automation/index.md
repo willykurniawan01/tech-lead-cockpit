@@ -47,6 +47,7 @@ sequenceDiagram
 | [`src/projects/E2EEnvironmentModal.svelte`](file:///Users/ridwan/mine/tech-lead-cockpit/src/projects/E2EEnvironmentModal.svelte) | Modal Manajemen Environment | Pengaturan URL base, auth token, dan mock variables untuk environment pengujian (Staging, Development, Local). Modal selebar 1080px. Base URL per service dan Variabel masing-masing selebar penuh, dan tinggi textarea mengikuti jumlah baris (`rowsFor`, 6–18 baris). |
 | [`src/lib/qa/client.ts`](file:///Users/ridwan/mine/tech-lead-cockpit/src/lib/qa/client.ts) | QA API Client | Penghubung antarmuka UI dengan endpoint connector `/api/connector/qa/*`. |
 | [`src/lib/qa/types.ts`](file:///Users/ridwan/mine/tech-lead-cockpit/src/lib/qa/types.ts) | Definisi Tipe Data QA | Schema untuk `QASuite` (termasuk `groups`), `QAScenario`, `QAStep`, `QAEnvironment`, dan `QARunResult`. |
+| [`src/lib/qa/latest.ts`](../../../src/lib/qa/latest.ts) | Hasil Terakhir per Flow | `latestResults`: hasil final (lulus/gagal/error/diblokir) tiap flow dari run terbaru yang benar-benar menjalankannya di environment terpilih; `resultBucket`/`resultCounts` untuk filter dan hitungan. Test di [`latest.test.ts`](../../../src/lib/qa/latest.test.ts). |
 | [`src/lib/qa/groups.ts`](../../../src/lib/qa/groups.ts) | Grup Test Case | Fungsi murni untuk grup di tab Skenario: urutan grup, tampilan per grup, status centang grup, tambah/ganti nama/hapus/urutkan grup, pindah flow antar grup dan di dalam grup. Dipakai UI dan connector. Test di [`groups.test.ts`](../../../src/lib/qa/groups.test.ts). |
 
 ### Backend Connector (`connector/qa/`)
@@ -101,6 +102,15 @@ Grup sebuah flow adalah `flow.stage`: tahap dari rencana journey, atau grup yang
   - Agent penulis mengganti flow per **judul** tahap rencana. Grup manual dengan nama di luar rencana diperlakukan seperti flow manual: tidak pernah diganti.
   - Ganti nama grup yang judulnya tahap rencana dikonfirmasi dulu. Bila tahap itu ditulis ulang, test case-nya masuk lagi ke grup bernama lama, dan flow di grup yang sudah diganti namanya tidak ikut diganti.
   - Menghapus grup tahap rencana juga diberi peringatan yang sama.
+
+## ✅ Status lulus di tab Skenario
+
+Tab Skenario menampilkan hasil tiap flow tanpa perlu membuka Hasil Run.
+
+- **Sumber data.** `latestResults(runs, env.id)` mengambil hasil dari run terbaru yang benar-benar menjalankan flow itu di environment terpilih. Run berisi satu flow juga dihitung. Hasil yang belum final (berjalan, menunggu, dilewati karena run dibatalkan) tidak menimpa hasil sebelumnya, dan hasil dari environment lain tidak dipakai.
+- **Kartu flow.** Badge `Lulus · 22/10, 14.15` (atau Gagal/Error/Diblokir) muncul dengan tooltip waktu dan environment. Mengklik badge membuka run itu di tab Hasil Run. Flow yang belum pernah dijalankan diberi badge "Belum dijalankan". Saat run berjalan, badge "Berjalan"/"Menunggu" muncul di sampingnya.
+- **Judul grup.** Ringkasan `✓ n lulus · ✗ n gagal · n belum` atas semua flow di grup.
+- **Filter.** Chip Semua / Lulus / Gagal / Belum dijalankan beserta jumlahnya, digabung dengan pencarian dan kategori. Saat filter atau pencarian aktif, tombolnya menjadi **Centang yang tampil** / **Kosongkan yang tampil** dan hanya mengubah flow yang tampil. Ini memudahkan menjalankan ulang yang gagal saja.
 
 ## 🛠️ Perbaiki dengan AI (instruksi)
 

@@ -7,7 +7,8 @@
   import { loadAiSelection } from '../lib/ai/providers.svelte';
   import type { AiSelection } from '../lib/ai/types';
   import { qa, runReport } from '../lib/qa/client';
-  import { addGroup, edgeOfGroup, groupCheck, groupFlows, groupOrder, moveFlowInGroup, moveFlowToGroup, moveGroup, removeGroup, renameGroup, setGroupEnabled, UNGROUPED_LABEL, withGroups } from '../lib/qa/groups';
+  import { latestResults, resultBucket, resultCounts, type LatestResult, type ResultBucket } from '../lib/qa/latest';
+  import { addGroup, cleanGroupName, edgeOfGroup, groupCheck, groupFlows, groupOrder, moveFlowInGroup, moveFlowToGroup, moveGroup, removeGroup, renameGroup, setGroupEnabled, UNGROUPED_LABEL, withGroups } from '../lib/qa/groups';
   import { QA_CATEGORIES, QA_CATEGORY_LABELS, type QACategory, type QAEnvironment, type QAFlow, type QAGenerateJob, type QAGenerateRequest, type QAPipeline, type QAPlan, type QARun, type QASuspect, type QAStepResult, type QAStepStatus, type QASuite } from '../lib/qa/types';
   import type { EstimateProject } from '../lib/estimate/types';
   import type { Draft } from '../tad/drafts.svelte';
@@ -71,11 +72,14 @@
   // Search over the test cases (flows): name, description, category, tasks, steps (name, method, path, service).
   let flowQuery = $state('');
   let flowCategory = $state<QACategory | ''>('');
+  /** Filter by the latest outcome (Lulus / Gagal / Belum dijalankan). */
+  let flowResult = $state<ResultBucket | ''>('');
   const visibleFlows = $derived.by(() => {
     const flows = suite?.flows ?? [];
     const terms = flowQuery.toLowerCase().split(/\s+/).filter(Boolean);
     return flows.filter((f) => {
       if (flowCategory && f.category !== flowCategory) return false;
+      if (flowResult && resultBucket(latest.get(f.id)) !== flowResult) return false;
       if (!terms.length) return true;
       const hay = [f.name, f.description, QA_CATEGORY_LABELS[f.category], ...f.taskTitles, ...f.steps.flatMap((st) => [st.name, st.request.method, st.request.path, st.service ?? ''])].join(' ').toLowerCase();
       return terms.every((t) => hay.includes(t));
@@ -108,6 +112,21 @@
   const running = $derived(activeRun?.status === 'running');
   /** Last result of each flow in the shown run, for the badges in the flow list. */
   const lastStatus = $derived(Object.fromEntries((activeRun?.flows ?? []).map((f) => [f.flowId, f.status])) as Record<string, QAStepStatus>);
+  /** Each flow's latest real outcome on the selected environment, across all runs (also one-flow runs). */
+  const latest = $derived(latestResults(runs, env?.id));
+  const totals = $derived(resultCounts(suite?.flows ?? [], latest));
+  const RESULT_FILTERS: { value: ResultBucket | ''; label: string }[] = [
+    { value: '', label: 'Semua' },
+    { value: 'passed', label: 'Lulus' },
+    { value: 'failed', label: 'Gagal' },
+    { value: 'none', label: 'Belum dijalankan' },
+  ];
+  const shortTime = (iso: string) => new Date(iso).toLocaleString('id-ID', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
+  const resultTitle = (r: LatestResult) => `Hasil run terakhir: ${STATUS[r.status].label} · ${new Date(r.at).toLocaleString('id-ID')} · ${r.envName}. Klik untuk membuka run ini.`;
+  function openResult(r: LatestResult) {
+    tab = 'results';
+    void showRun(r.runId);
+  }
 
   // Load everything for the project; also resumes a generation or run still going in the connector.
   $effect(() => {
@@ -345,10 +364,12 @@
 
   // Groups: a flow's group is its `stage`; the suite keeps their order and the empty ones.
   const NEW_GROUP = '\u0000new';
-  const searching = $derived(Boolean(flowQuery.trim() || flowCategory));
+  const searching = $derived(Boolean(flowQuery.trim() || flowCategory || flowResult));
   const groupNames = $derived(suite ? groupOrder(suite) : []);
   const shownGroups = $derived(suite ? groupFlows(suite, searching ? new Set(visibleFlows.map((f) => f.id)) : undefined) : []);
   /** Group names the journey plan uses: a writer agent replaces those groups' flows by name. */
+  /** All flows of a group (not only a search's matches), for its counts. */
+  const groupMembers = (name: string) => (suite?.flows ?? []).filter((f) => cleanGroupName(f.stage) === name);
   const planStage = (name: string) => Boolean(name && plan?.stages.some((st) => st.title === name));
   let newGroupOpen = $state(false);
   let newGroupName = $state('');
@@ -439,8 +460,11 @@
     void persist({ ...suite, flows: suite.flows.map((f) => (f.id === flow.id ? { ...f, enabled: !f.enabled } : f)) });
   }
 
+  /** All flows, or only the ones a search or filter shows (e.g. check just the failed ones to run again). */
   function setAll(enabled: boolean) {
-    if (suite) void persist({ ...suite, flows: suite.flows.map((f) => ({ ...f, enabled })) });
+    if (!suite) return;
+    const shown = new Set(visibleFlows.map((f) => f.id));
+    void persist({ ...suite, flows: suite.flows.map((f) => (!searching || shown.has(f.id) ? { ...f, enabled } : f)) });
   }
 
   async function removeFlow(flow: QAFlow) {
@@ -683,13 +707,21 @@
             <option value="">Semua kategori</option>
             {#each QA_CATEGORIES as c (c)}<option value={c}>{QA_CATEGORY_LABELS[c]}</option>{/each}
           </select>
-          {#if flowQuery || flowCategory}<span class="muted small">{visibleFlows.length} dari {suite.flows.length}</span>{/if}
-          <button class="btn btn-ghost btn-sm" onclick={() => setAll(true)}>Centang semua</button>
-          <button class="btn btn-ghost btn-sm" onclick={() => setAll(false)}>Kosongkan</button>
+          {#if searching}<span class="muted small">{visibleFlows.length} dari {suite.flows.length}</span>{/if}
+          <button class="btn btn-ghost btn-sm" onclick={() => setAll(true)}>{searching ? 'Centang yang tampil' : 'Centang semua'}</button>
+          <button class="btn btn-ghost btn-sm" onclick={() => setAll(false)}>{searching ? 'Kosongkan yang tampil' : 'Kosongkan'}</button>
           <span class="grow"></span>
           <button class="btn btn-sm" class:btn-primary={fixOpen} onclick={() => (fixOpen ? (fixOpen = false) : openFix())} disabled={pipelineBusy} title="AI memperbaiki test case sesuai instruksimu (membaca kode, hanya baca)"><Icon name="sparkles" size={13} /> Perbaiki dengan AI</button>
           <button class="btn btn-sm" class:btn-primary={newGroupOpen} onclick={() => (newGroupOpen = !newGroupOpen)} title="Grup untuk mengelompokkan test case (urutan grup = urutan run)"><Icon name="plus" size={13} /> Grup baru</button>
           <button class="btn btn-sm" onclick={() => addFlow()}><Icon name="plus" size={13} /> Flow manual</button>
+        </div>
+        <div class="result-filter" role="group" aria-label="Filter hasil run terakhir">
+          <span class="muted small">Hasil terakhir{env ? ` di ${env.name}` : ''}:</span>
+          {#each RESULT_FILTERS as rf (rf.value)}
+            <button class="chip filter-chip rf-{rf.value || 'all'}" class:active={flowResult === rf.value} onclick={() => (flowResult = rf.value)} aria-pressed={flowResult === rf.value}>
+              {rf.label} <strong>{rf.value ? totals[rf.value] : suite.flows.length}</strong>
+            </button>
+          {/each}
         </div>
         {#if newGroupOpen}{@render groupForm()}{/if}
         {#if suite.undo?.flows.length}
@@ -753,6 +785,14 @@
               <h4 class="stage-head" class:loose={!group.name}>{group.name || UNGROUPED_LABEL}</h4>
             {/if}
             <span class="muted small count" title="Flow yang dicentang untuk dijalankan">{check.checked}/{check.total}</span>
+            {#if check.total}
+              {@const rc = resultCounts(groupMembers(group.name), latest)}
+              <span class="small group-results" title="Hasil run terakhir flow di grup ini">
+                {#if rc.passed}<span class="res-ok">✓ {rc.passed} lulus</span>{/if}
+                {#if rc.failed}<span class="res-err">✗ {rc.failed} gagal</span>{/if}
+                {#if rc.none}<span class="muted">{rc.none} belum</span>{/if}
+              </span>
+            {/if}
             <span class="grow"></span>
             <span class="flow-actions">
               <button class="btn btn-ghost btn-sm" onclick={() => addFlow(group.name)} title="Tambah flow manual di grup ini" aria-label="Tambah flow di grup {group.name || UNGROUPED_LABEL}"><Icon name="plus" size={13} /></button>
@@ -769,6 +809,7 @@
           {/if}
           {#each group.flows as flow (flow.id)}
           {@const edge = edgeOfGroup(suite, flow.id)}
+          {@const res = latest.get(flow.id)}
           <article class="card flow" class:disabled={!flow.enabled}>
             <div class="flow-head">
               <input type="checkbox" checked={flow.enabled} onchange={() => toggleFlow(flow)} aria-label="Ikut dijalankan" />
@@ -779,8 +820,15 @@
               </button>
               <span class="chip">{QA_CATEGORY_LABELS[flow.category]}</span>
               <span class="muted small">{flow.steps.length} step</span>
-              {#if lastStatus[flow.id]}
+              {#if running && (lastStatus[flow.id] === 'running' || lastStatus[flow.id] === 'pending')}
                 <span class="badge {STATUS[lastStatus[flow.id]].cls}">{STATUS[lastStatus[flow.id]].label}</span>
+              {/if}
+              {#if res}
+                <button class="badge result-badge {STATUS[res.status].cls}" onclick={() => openResult(res)} title={resultTitle(res)}>
+                  <Icon name={STATUS[res.status].icon} size={11} /> {STATUS[res.status].label} · {shortTime(res.at)}
+                </button>
+              {:else}
+                <span class="badge" title="Belum pernah dijalankan{env ? ` di ${env.name}` : ''}">Belum dijalankan</span>
               {/if}
               {#if flow.warnings?.length}
                 <span class="badge st-warn" title={flow.warnings.join('\n')}><Icon name="alert" size={11} /> {flow.warnings.length} endpoint di luar rencana</span>
@@ -1153,6 +1201,50 @@
   .empty-actions {
     display: flex;
     gap: 8px;
+  }
+  /* Latest outcome: filter chips, per-group counts, and the badge on each card (opens that run). */
+  .result-filter {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  .filter-chip {
+    cursor: pointer;
+    border: 1px solid var(--border);
+    font: inherit;
+    font-size: 12px;
+  }
+  .filter-chip.active {
+    border-color: var(--accent);
+    background: var(--accent-soft);
+    color: var(--text);
+  }
+  .filter-chip.rf-passed strong {
+    color: var(--ok);
+  }
+  .filter-chip.rf-failed strong {
+    color: var(--err);
+  }
+  .group-results {
+    display: inline-flex;
+    gap: 8px;
+    white-space: nowrap;
+  }
+  .res-ok {
+    color: var(--ok);
+  }
+  .res-err {
+    color: var(--err);
+  }
+  .result-badge {
+    cursor: pointer;
+    border: none;
+    font: inherit;
+    font-size: 11px;
+  }
+  .result-badge:hover {
+    text-decoration: underline;
   }
   .group-form {
     display: flex;
