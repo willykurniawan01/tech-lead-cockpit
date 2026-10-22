@@ -5,6 +5,7 @@
   import { toasts } from '../components/toast.svelte';
   import { qa } from '../lib/qa/client';
   import { handleConflict } from '../lib/qa/conflict';
+  import EnvTransfer from './EnvTransfer.svelte';
   import { matchDatabases, matchScore } from '../lib/qa/db-match';
   import { emptyEnvironment, type QAEnvironment } from '../lib/qa/types';
 
@@ -237,7 +238,10 @@
           <button class="btn btn-ghost btn-sm" onclick={() => remove(env)} aria-label="Hapus {env.name}"><Icon name="trash" size={13} /></button>
         </div>
       {/each}
-      <button class="btn btn-primary btn-sm add" onclick={() => edit(null)}><Icon name="plus" size={13} /> Tambah environment</button>
+      <div class="list-actions">
+        <button class="btn btn-primary btn-sm" onclick={() => edit(null)}><Icon name="plus" size={13} /> Tambah environment</button>
+        <EnvTransfer bind:environments />
+      </div>
     </div>
   {:else}
     <form class="env-form" onsubmit={(e) => { e.preventDefault(); void save(); }}>
@@ -416,8 +420,11 @@
     display: flex;
     gap: 6px;
   }
-  .add {
-    align-self: flex-start;
+  .list-actions {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
     margin-top: 4px;
   }
   .env-form {

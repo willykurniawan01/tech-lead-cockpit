@@ -38,6 +38,7 @@ import type { ReleaseAiJob } from '../src/lib/release/types.ts';
 import { PdfPasswordError } from './pdf-unlock.ts';
 import { QA_KEYCHAIN_SERVICE, QaInputError, QaManager } from './qa/manager.ts';
 import { DraftedQaStore, QaDraftError } from './qa/drafts.ts';
+import { EnvTransferError } from './qa/env-transfer.ts';
 import { FileQaStore, QaConflictError } from './qa/store.ts';
 import { createPgPool, PgQaStore, QaStoreError } from './qa/pg-store.ts';
 import { connectionOf, QaStoreSwitch } from './qa/store-config.ts';
@@ -45,7 +46,7 @@ import { ConfluenceQaStore } from './qa/confluence-store.ts';
 import { createHash } from 'node:crypto';
 import { moveToCentral } from './qa/store-migrate.ts';
 import { DATA_DIR } from './paths.ts';
-import { userInfo } from 'node:os';
+import { homedir, userInfo } from 'node:os';
 import { MAX_QA_TASKS, normalizeEditedFlow } from './qa/generator.ts';
 import { checkFlowsAgainstPlan } from './qa/plan.ts';
 import { ReportInputError, ReportVps, type ReportSettings } from './report/vps.ts';
@@ -80,7 +81,7 @@ import { draftReply } from './whatsapp/drafter.ts';
 import { readTemplates, validateTemplates, writeTemplates } from './whatsapp/templates.ts';
 import * as path from 'node:path';
 import { execFile } from 'node:child_process';
-import { readFile, writeFile } from 'node:fs/promises';
+import { access, readFile, writeFile } from 'node:fs/promises';
 import { handleAssistantChat, type AssistantChatRequest } from './assistant.ts';
 import { resolveRepoPath } from './git-review.ts';
 import { checkClaudeCloudAuth, startClaudeCloudSession, sendClaudeCloudMessage, runClaudeUltrareview } from './claude-cloud.ts';
@@ -1154,6 +1155,33 @@ async function handleQa(route: string, url: URL, req: IncomingMessage, res: Serv
       const body = await readJson<{ environmentId?: string }>(req, 16 * 1024);
       return send(res, 200, { databases: await qa.listServerDatabases(String(body.environmentId ?? '')) });
     }
+    if (route === 'POST /qa/environments/export') {
+      // Written to ~/Downloads (the desktop webview can't download); secrets only encrypted.
+      const body = await readJson<{ ids?: unknown; passphrase?: unknown }>(req, 64 * 1024);
+      const ids = Array.isArray(body.ids) ? body.ids.map(String) : undefined;
+      const passphrase = typeof body.passphrase === 'string' ? body.passphrase : undefined;
+      const file = await qa.exportEnvironments(ids, passphrase);
+      const d = new Date();
+      const pad = (n: number) => String(n).padStart(2, '0');
+      const stamp = `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}`;
+      let target = path.join(homedir(), 'Downloads', `cockpit-environment-${stamp}.json`);
+      for (let n = 2; await access(target).then(() => true, () => false); n++) target = path.join(homedir(), 'Downloads', `cockpit-environment-${stamp}-${n}.json`);
+      await writeFile(target, JSON.stringify(file, null, 2), { mode: 0o600, flag: 'wx' });
+      const names = file.environments.map((e) => e.name).join(', ');
+      await audit({ ts: new Date().toISOString(), action: 'qa.env.export', result: 'success', spaceKey: target, title: `${file.environments.length} environment${file.secrets ? ' + rahasia terenkripsi' : ''}: ${names}`.slice(0, 300), attachments: 0 }).catch(() => {});
+      return send(res, 200, { path: target, count: file.environments.length, withSecrets: Boolean(file.secrets) });
+    }
+    if (route === 'POST /qa/environments/import/preview') {
+      const body = await readJson<{ file?: unknown; passphrase?: unknown }>(req, 4 * 1024 * 1024);
+      return send(res, 200, await qa.previewImport(body.file, typeof body.passphrase === 'string' && body.passphrase ? body.passphrase : undefined));
+    }
+    if (route === 'POST /qa/environments/import') {
+      const body = await readJson<{ file?: unknown; passphrase?: unknown; actions?: Record<string, unknown> }>(req, 4 * 1024 * 1024);
+      const actions = Object.fromEntries(Object.entries(body.actions ?? {}).filter(([, v]) => v === 'new' || v === 'replace' || v === 'skip')) as Record<string, 'new' | 'replace' | 'skip'>;
+      const result = await qa.importEnvironments(body.file, typeof body.passphrase === 'string' && body.passphrase ? body.passphrase : undefined, actions);
+      await audit({ ts: new Date().toISOString(), action: 'qa.env.import', result: 'success', spaceKey: qaStores.status().target ?? '', title: `${result.imported} environment di-import, ${result.skipped} dilewati`, attachments: 0 }).catch(() => {});
+      return send(res, 200, result);
+    }
     if (route === 'POST /qa/environments/delete') {
       const body = await readJson<{ id?: string }>(req, 16 * 1024);
       return send(res, 200, await qa.deleteEnvironment(String(body.id ?? '')));
@@ -1287,7 +1315,7 @@ async function handleQa(route: string, url: URL, req: IncomingMessage, res: Serv
     }
     return fail(res, 404, { error: `Route tidak dikenal: ${route}`, code: 'not-found' });
   } catch (e) {
-    if (e instanceof QaInputError || e instanceof QaDraftError) throw new ConfluenceError(e.message, 400, 'bad-request');
+    if (e instanceof QaInputError || e instanceof QaDraftError || e instanceof EnvTransferError) throw new ConfluenceError(e.message, 400, 'bad-request');
     // Someone saved first: the page offers to reload instead of overwriting.
     if (e instanceof QaConflictError) return fail(res, 409, { error: e.message, code: 'conflict', updatedBy: e.updatedBy, updatedAt: e.updatedAt });
     if (e instanceof QaStoreError) return fail(res, 503, { error: e.message, code: 'store-unavailable' });

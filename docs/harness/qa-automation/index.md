@@ -244,6 +244,13 @@ Data E2E (proyek, suite beserta grup, rencana journey, riwayat run, dan environm
 - urutan (milik saya bila hanya saya yang mengubah urutan), daftar grup (gabungan), field suite lain.
 Hanya test case yang sama (atau field suite yang sama, mis. catatan) yang berubah di kedua sisi menjadi konflik: `QaConflictError` dengan daftar yang bentrok ("Test case "X" sudah diubah oleh Y pada Z"). Berlaku untuk semua mode (file, Confluence, PostgreSQL).
 
+### 📦 Import / export environment
+Tombol **Export** dan **Import** di modal Environment ([`EnvTransfer.svelte`](../../../src/projects/EnvTransfer.svelte), logika [`connector/qa/env-transfer.ts`](../../../connector/qa/env-transfer.ts), keduanya identik di Tech Lead Cockpit dan QA Cockpit). Untuk memindahkan environment antar laptop, antar workspace, atau antara TL dan QA Cockpit.
+- **File** `cockpit-environment-<tanggal>.json` (format `cockpit-environments`, versi 1) ditulis connector ke `~/Downloads` (0600), karena webview desktop tidak bisa download. Isinya konfigurasi environment tanpa field status Keychain dan versi.
+- **Rahasia** (token auth, variabel rahasia, password server DB, password DB per database) ikut bila dicentang, **hanya terenkripsi**: scrypt (N=2^15) + AES-256-GCM dengan passphrase yang diketik user (min. 8 karakter, tidak disimpan). Tanpa passphrase, file tidak berisi rahasia.
+- **Import**: pilih file → preview (`POST /qa/environments/import/preview`, tidak menyimpan apa pun): cocok dengan environment di sini berdasarkan id lalu nama, daftar rahasia yang dibawa, error validasi. Per environment: **Ganti** (menimpa yang cocok dengan versinya; rahasia hanya diganti bila ada di file), **Tambah baru** (nama kembar diberi " (2)"), atau **Lewati**. Konfirmasi dulu karena tersimpan ke penyimpanan bersama; rahasia masuk Keychain laptop ini lewat `saveEnvironment`.
+- **Audit**: `qa.env.export` (lokasi file, jumlah, ada rahasia atau tidak) dan `qa.env.import`.
+
 ### Review sebelum kirim (draft lokal)
 Dengan penyimpanan bersama, perubahan test case **tidak langsung** ke Confluence. `DraftedQaStore` ([`connector/qa/drafts.ts`](../../../connector/qa/drafts.ts)) membungkus store bersama: setiap simpan suite (edit manual, generate, agent penulis, repair, Perbaiki dengan AI, undo) masuk ke draft lokal `<data>/qa-drafts/<projectId>.json` (0600). Rencana, run, environment, dan proyek tetap langsung ke store bersama.
 - **Draft** menyimpan suite terbit saat draft dimulai (`base`), suite draft, dan revisi lokal `draftRev`. Simpan ke draft wajib membawa `draftRev` yang dimuat; kalau tidak, 409 lalu `QaManager` menggabung per test case seperti biasa (kunci `served` = versi + `draftRev`). Kembali sama dengan yang terbit = draft dihapus.
@@ -272,6 +279,9 @@ Dengan penyimpanan bersama, perubahan test case **tidak langsung** ke Confluence
 | `GET /qa/suite/review` | Perubahan draft lokal per test case dan yang bentrok |
 | `POST /qa/suite/publish` | Kirim perubahan draft (semua atau `keys`) ke store bersama, audit `qa.suite.publish` |
 | `POST /qa/suite/discard` | Buang perubahan draft (semua atau `keys`) |
+| `POST /qa/environments/export` | Tulis file export ke ~/Downloads (`ids`, `passphrase` opsional untuk rahasia terenkripsi), audit |
+| `POST /qa/environments/import/preview` | Isi file export dicocokkan dengan environment di sini (tanpa menyimpan) |
+| `POST /qa/environments/import` | Simpan environment dari file per tindakan (`replace`/`new`/`skip`), rahasia ke Keychain, audit |
 
 ---
 

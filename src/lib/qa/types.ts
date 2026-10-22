@@ -139,6 +139,32 @@ export interface QAEnvironment {
   updatedAt?: string;
 }
 
+/** An environment in an import file, as the preview shows it. */
+export interface QAEnvImportItem {
+  /** Its id in the file (the key for the chosen action). */
+  id: string;
+  name: string;
+  baseUrl: string;
+  /** An environment here with the same id, or else the same name. */
+  match?: { id: string; name: string; by: 'id' | 'name' };
+  /** Keychain values the file carries for it ('token auth', 'password DB promo', …). */
+  secrets: string[];
+  /** Why it can't be imported. */
+  error?: string;
+}
+
+export interface QAEnvImportPreview {
+  exportedAt?: string;
+  exportedBy?: string;
+  /** The file carries encrypted secrets (a passphrase is needed to import them). */
+  hasSecrets: boolean;
+  /** Secrets were opened with the passphrase given. */
+  secretsOpened: boolean;
+  items: QAEnvImportItem[];
+}
+
+export type QAEnvImportAction = 'new' | 'replace' | 'skip';
+
 export type QAAssertion =
   | { type: 'status'; op: 'equals' | 'in'; expected: number | number[] }
   | { type: 'json'; path: string; op: QAValueOp; expected?: unknown }

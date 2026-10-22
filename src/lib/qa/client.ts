@@ -1,7 +1,7 @@
 import { api, connectorDownMessage } from '../api-base';
 import type { AiSelection } from '../ai/types';
 import type { AppSettings } from '../settings/types';
-import type { QAAgentJob, QAEnvironment, QAGenerateJob, QAGenerateRequest, QAPipeline, QAPlan, QAProject, QARun, QARunRequest, QAStoreMigration, QAStoreStatus, QASuite, QASuiteReview, QATadRef } from './types';
+import type { QAAgentJob, QAEnvImportAction, QAEnvImportPreview, QAEnvironment, QAGenerateJob, QAGenerateRequest, QAPipeline, QAPlan, QAProject, QARun, QARunRequest, QAStoreMigration, QAStoreStatus, QASuite, QASuiteReview, QATadRef } from './types';
 
 const HEADERS = { 'Content-Type': 'application/json', 'X-TLC-Client': '1' };
 
@@ -52,6 +52,12 @@ export const qa = {
   /** Database names on the environment's server. */
   listDatabases: (environmentId: string) => post<{ databases: string[] }>('/db/list', { environmentId }).then((r) => r.databases),
   deleteEnvironment: (id: string) => post<QAEnvironment[]>('/environments/delete', { id }),
+  /** Writes the chosen environments (all when `ids` is absent) to a file in ~/Downloads; secrets only with a passphrase, encrypted. */
+  exportEnvironments: (ids?: string[], passphrase?: string) => post<{ path: string; count: number; withSecrets: boolean }>('/environments/export', { ids, passphrase }),
+  /** What an export file holds, matched against the environments here (nothing saved). */
+  previewEnvironmentImport: (file: unknown, passphrase?: string) => post<QAEnvImportPreview>('/environments/import/preview', { file, passphrase }),
+  importEnvironments: (file: unknown, passphrase: string | undefined, actions: Record<string, QAEnvImportAction>) =>
+    post<{ imported: number; skipped: number; environments: QAEnvironment[] }>('/environments/import', { file, passphrase, actions }),
   /** `draftIds`/`projectName` let a project adopt the per-TAD suites stored before projects existed. */
   suite: (projectId: string, adopt?: { projectName: string; draftIds: string[] }) =>
     call<{ suite: QASuite | null }>(`/suite${q({ projectId, ...(adopt ? { projectName: adopt.projectName, draftIds: adopt.draftIds.join(',') } : {}) })}`).then((r) => r.suite),

@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, readdir, readFile, rename, rm } from 'node:fs/promises'
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { AiSelection } from '../../src/lib/ai/types.ts';
-import type { QASuiteReview } from '../../src/lib/qa/types.ts';
+import type { QAEnvImportAction, QAEnvImportPreview, QASuiteReview } from '../../src/lib/qa/types.ts';
 import type { QAAgentJob, QADatabase, QADbConnection, QADbResult, QADbServer, QAEnvironment, QAPipeline, QAPlan, QAProject, QASuspect, QAFlow, QAFlowResult, QAGenerateJob, QAGenerateRequest, QARun, QARunRequest, QASuite, QATadRef } from '../../src/lib/qa/types.ts';
 import { executeSetup, listDatabases, QaDbError, queryReadOnly, schemaSummary, testConnection } from './db.ts';
 import { matchDatabases } from '../../src/lib/qa/db-match.ts';
@@ -15,6 +15,7 @@ import { verifyEvidence } from '../trace/verify.ts';
 import { declaredTypes, runFlow, summarize } from './runner.ts';
 import { DATA_DIR } from '../paths.ts';
 import { DraftedQaStore } from './drafts.ts';
+import { buildExport, decryptSecrets, describeSecrets, type EnvExportFile, type EnvSecrets, readExport } from './env-transfer.ts';
 import { FileQaStore, QaConflictError, type QaStore } from './store.ts';
 
 /**
@@ -323,6 +324,108 @@ export class QaManager {
     }
     await this.store.saveEnvironment(env, await this.actor());
     return this.listEnvironments();
+  }
+
+  // Import / export ----------------------------------------------------------------------------
+
+  private async envSecrets(env: QAEnvironment): Promise<EnvSecrets> {
+    const token = await this.deps.readSecret(env.id);
+    const variables = await this.secretVariables(env.id);
+    const dbServer = await this.deps.readSecret(serverSecretKey(env.id));
+    const databases: Record<string, string> = {};
+    for (const d of env.databases ?? []) {
+      const v = await this.deps.readSecret(dbSecretKey(env.id, d.name));
+      if (v) databases[d.name] = v;
+    }
+    return {
+      ...(token ? { token } : {}),
+      ...(Object.keys(variables).length ? { variables } : {}),
+      ...(dbServer ? { dbServer } : {}),
+      ...(Object.keys(databases).length ? { databases } : {}),
+    };
+  }
+
+  /** The chosen environments (all when `ids` is absent); Keychain secrets only with a passphrase, encrypted. */
+  async exportEnvironments(ids: string[] | undefined, passphrase?: string): Promise<EnvExportFile> {
+    const envs = (await this.store.listEnvironments()).filter((e) => !ids || ids.includes(e.id));
+    if (!envs.length) throw new QaInputError('Tidak ada environment untuk di-export.');
+    let secrets: Record<string, EnvSecrets> | undefined;
+    if (passphrase !== undefined) {
+      secrets = {};
+      for (const e of envs) secrets[e.id] = await this.envSecrets(e);
+    }
+    return buildExport(envs, secrets, passphrase, await this.actor());
+  }
+
+  private async openImport(raw: unknown, passphrase?: string): Promise<{ file: EnvExportFile; secrets?: Record<string, EnvSecrets>; existing: QAEnvironment[] }> {
+    const file = readExport(raw);
+    const secrets = file.secrets && passphrase ? decryptSecrets(file.secrets, passphrase) : undefined;
+    return { file, secrets, existing: await this.store.listEnvironments() };
+  }
+
+  private static matchOf(env: Partial<QAEnvironment>, existing: QAEnvironment[]): QAEnvironment & { by: 'id' | 'name' } | undefined {
+    const byId = existing.find((e) => e.id === env.id);
+    if (byId) return { ...byId, by: 'id' };
+    const name = String(env.name ?? '').trim().toLowerCase();
+    const byName = existing.find((e) => e.name.trim().toLowerCase() === name);
+    return byName ? { ...byName, by: 'name' } : undefined;
+  }
+
+  /** What an import file holds and how it lines up with the environments here (nothing is saved). */
+  async previewImport(raw: unknown, passphrase?: string): Promise<QAEnvImportPreview> {
+    const { file, secrets, existing } = await this.openImport(raw, passphrase);
+    return {
+      exportedAt: file.exportedAt,
+      ...(file.exportedBy ? { exportedBy: file.exportedBy } : {}),
+      hasSecrets: Boolean(file.secrets),
+      secretsOpened: Boolean(secrets),
+      items: file.environments.map((e, i) => {
+        const id = typeof e?.id === 'string' && e.id ? e.id : `#${i + 1}`;
+        let error: string | undefined;
+        try {
+          validateEnvironment({ ...e, version: undefined });
+        } catch (err) {
+          error = (err as Error).message;
+        }
+        const match = QaManager.matchOf(e, existing);
+        return {
+          id,
+          name: String(e?.name ?? id),
+          baseUrl: String(e?.baseUrl ?? ''),
+          ...(match ? { match: { id: match.id, name: match.name, by: match.by } } : {}),
+          secrets: describeSecrets(secrets?.[e?.id]),
+          ...(error ? { error } : {}),
+        };
+      }),
+    };
+  }
+
+  /**
+   * Saves the file's environments: 'replace' overwrites the matching one here (its secrets only
+   * where the file has them), 'new' adds a copy, 'skip' leaves it. Default: replace a match, else new.
+   */
+  async importEnvironments(raw: unknown, passphrase: string | undefined, actions: Record<string, QAEnvImportAction> = {}): Promise<{ imported: number; skipped: number; environments: QAEnvironment[] }> {
+    const { file, secrets, existing } = await this.openImport(raw, passphrase);
+    if (file.secrets && !secrets && passphrase) throw new QaInputError('Passphrase salah.');
+    let imported = 0;
+    let skipped = 0;
+    for (const e of file.environments) {
+      const match = QaManager.matchOf(e, existing);
+      const action = actions[e.id] ?? (match ? 'replace' : 'new');
+      if (action === 'skip') {
+        skipped++;
+        continue;
+      }
+      const taken = new Set(existing.map((x) => x.name.trim().toLowerCase()));
+      let name = String(e.name ?? '').trim();
+      if (action === 'new') for (let n = 2; taken.has(name.toLowerCase()); n++) name = `${String(e.name).trim()} (${n})`;
+      const target = action === 'replace' && match ? { id: match.id, version: match.version } : { id: '', version: undefined };
+      const s = secrets?.[e.id];
+      const saved = await this.saveEnvironment({ ...e, name, ...target }, s?.token, s?.variables, s?.databases, s?.dbServer);
+      existing.splice(0, existing.length, ...saved);
+      imported++;
+    }
+    return { imported, skipped, environments: await this.listEnvironments() };
   }
 
   /** Connection of one database: its own host, or the environment's server. */
