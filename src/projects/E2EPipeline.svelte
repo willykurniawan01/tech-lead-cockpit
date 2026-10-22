@@ -260,15 +260,15 @@
     flex-direction: column;
     gap: 8px;
     padding: 12px 14px;
-    /* The panel itself doesn't scroll: these cards scroll inside, the test cases keep room below. */
+    /* Long plans scroll inside the card (up to a share of the screen); the page scrolls around them. */
     flex-shrink: 0;
     min-height: 0;
   }
   .plan {
-    max-height: 62%;
+    max-height: 70vh;
   }
   .agents {
-    max-height: 30%;
+    max-height: 40vh;
   }
   .agent-list,
   .stages {

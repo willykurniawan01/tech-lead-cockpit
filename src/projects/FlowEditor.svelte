@@ -14,6 +14,7 @@
     serviceUrls = {},
     taskTitles,
     databases = [],
+    groups = [],
     onsave,
     oncancel,
   }: {
@@ -23,6 +24,8 @@
     serviceUrls?: Record<string, string>;
     taskTitles: string[];
     databases?: string[];
+    /** Existing groups of the suite, offered in the Grup field (a new name makes a new group). */
+    groups?: string[];
     onsave: (flow: QAFlow) => Promise<string | void>;
     oncancel: () => void;
   } = $props();
@@ -272,7 +275,7 @@
         <select class="input" bind:value={category}>{#each QA_CATEGORIES as c (c)}<option value={c}>{QA_CATEGORY_LABELS[c]}</option>{/each}</select>
       </label>
     </div>
-    <label class="field"><span>Tahap journey <em class="muted">(urutan alur, mis. "1. Buat data promo (CMS)")</em></span><input class="input" bind:value={stage} placeholder="2. Approval & aktivasi" /></label>
+    <label class="field"><span>Grup <em class="muted">(pilih grup yang ada atau ketik nama baru; kosong = Tanpa grup)</em></span><input class="input" bind:value={stage} list="flow-groups" maxlength="120" placeholder="2. Approval & aktivasi" /></label>
     <label class="field"><span>Deskripsi <em class="muted">(tujuan & kondisi awal)</em></span><textarea class="input" rows="2" bind:value={description}></textarea></label>
 
     {#if taskTitles.length}
@@ -416,6 +419,7 @@
         {/if}
       </div>
     {/each}
+    <datalist id="flow-groups">{#each groups as g (g)}<option value={g}></option>{/each}</datalist>
     <datalist id="flow-services">{#each services as sv (sv)}<option value={sv}></option>{/each}</datalist>
   {/if}
 

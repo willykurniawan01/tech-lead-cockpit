@@ -7,6 +7,7 @@
   import { loadAiSelection } from '../lib/ai/providers.svelte';
   import type { AiSelection } from '../lib/ai/types';
   import { qa, runReport } from '../lib/qa/client';
+  import { addGroup, edgeOfGroup, groupCheck, groupFlows, groupOrder, moveFlowInGroup, moveFlowToGroup, moveGroup, removeGroup, renameGroup, setGroupEnabled, UNGROUPED_LABEL, withGroups } from '../lib/qa/groups';
   import { QA_CATEGORIES, QA_CATEGORY_LABELS, type QACategory, type QAEnvironment, type QAFlow, type QAGenerateJob, type QAGenerateRequest, type QAPipeline, type QAPlan, type QARun, type QASuspect, type QAStepResult, type QAStepStatus, type QASuite } from '../lib/qa/types';
   import type { EstimateProject } from '../lib/estimate/types';
   import type { Draft } from '../tad/drafts.svelte';
@@ -337,15 +338,100 @@
     }
   }
 
-  /** Moves a flow one place in the journey (the order flows run and pass data in). */
+  /** Moves a flow one place within its group (the order flows run and pass data in). */
   async function moveFlow(flow: QAFlow, d: -1 | 1) {
-    if (!suite) return;
-    const flows = [...suite.flows];
-    const i = flows.findIndex((f) => f.id === flow.id);
-    const j = i + d;
-    if (i < 0 || j < 0 || j >= flows.length) return;
-    [flows[i], flows[j]] = [flows[j], flows[i]];
-    await persist({ ...($state.snapshot(suite) as QASuite), flows });
+    if (suite) await persist(moveFlowInGroup($state.snapshot(suite) as QASuite, flow.id, d));
+  }
+
+  // Groups: a flow's group is its `stage`; the suite keeps their order and the empty ones.
+  const NEW_GROUP = '\u0000new';
+  const searching = $derived(Boolean(flowQuery.trim() || flowCategory));
+  const groupNames = $derived(suite ? groupOrder(suite) : []);
+  const shownGroups = $derived(suite ? groupFlows(suite, searching ? new Set(visibleFlows.map((f) => f.id)) : undefined) : []);
+  /** Group names the journey plan uses: a writer agent replaces those groups' flows by name. */
+  const planStage = (name: string) => Boolean(name && plan?.stages.some((st) => st.title === name));
+  let newGroupOpen = $state(false);
+  let newGroupName = $state('');
+  /** Group being renamed, and the flow whose "move to a new group" box is open. */
+  let renaming = $state<string | null>(null);
+  let renameText = $state('');
+  let newGroupFor = $state<string | null>(null);
+  let newGroupForName = $state('');
+  /** Name boxes open with the cursor in them and the current name selected. */
+  const focusNow = (el: HTMLInputElement) => {
+    el.focus();
+    el.select();
+  };
+
+  /** Applies a group change; a bad name (empty, taken) is shown instead of saved. */
+  async function changeGroups(fn: (s: QASuite) => QASuite): Promise<boolean> {
+    // A project without test cases yet can still get its groups first.
+    const base = suite ? ($state.snapshot(suite) as QASuite) : { projectId: project.id, projectName: project.name, flows: [], updatedAt: new Date().toISOString() };
+    let next: QASuite;
+    try {
+      next = fn(base);
+    } catch (e) {
+      toasts.show((e as Error).message, 'err');
+      return false;
+    }
+    await persist(next);
+    return true;
+  }
+
+  async function createGroup() {
+    if (await changeGroups((s) => addGroup(s, newGroupName))) {
+      newGroupName = '';
+      newGroupOpen = false;
+    }
+  }
+
+  function startRename(name: string) {
+    renaming = name;
+    renameText = name;
+  }
+
+  async function saveRename(from: string) {
+    if (renameText.trim() === from) return void (renaming = null);
+    if (
+      planStage(from) &&
+      !(await confirmDialog({
+        title: 'Ganti nama tahap rencana?',
+        message: `"${from}" adalah tahap di rencana journey. Bila tahap ini nanti ditulis ulang oleh agent, test case-nya masuk lagi ke grup "${from}", dan flow di grup yang sudah diganti namanya tidak ikut diganti.`,
+        confirmText: 'Ganti nama',
+      }))
+    )
+      return;
+    if (await changeGroups((s) => renameGroup(s, from, renameText))) renaming = null;
+  }
+
+  async function deleteGroup(name: string) {
+    const count = suite?.flows.filter((f) => f.stage === name).length ?? 0;
+    const ok = await confirmDialog({
+      title: 'Hapus grup?',
+      message: `Hapus grup "${name}"?${count ? ` ${count} flow di dalamnya pindah ke "${UNGROUPED_LABEL}", tidak ikut terhapus.` : ''}${planStage(name) ? ' Grup ini tahap di rencana journey: bila tahapnya ditulis ulang, grupnya dibuat lagi.' : ''}`,
+      confirmText: 'Hapus grup',
+      danger: true,
+    });
+    if (ok) await changeGroups((s) => removeGroup(s, name));
+  }
+
+  function toggleGroup(name: string, enabled: boolean) {
+    if (suite) void persist({ ...($state.snapshot(suite) as QASuite), flows: setGroupEnabled(suite.flows, name, enabled) });
+  }
+
+  function pickGroup(flow: QAFlow, select: HTMLSelectElement) {
+    if (select.value === NEW_GROUP) {
+      select.value = flow.stage ?? '';
+      newGroupFor = flow.id;
+      newGroupForName = '';
+      return;
+    }
+    void changeGroups((s) => moveFlowToGroup(s, flow.id, select.value));
+  }
+
+  async function moveToNewGroup(flow: QAFlow) {
+    const name = newGroupForName;
+    if (await changeGroups((s) => moveFlowToGroup(addGroup(s, name), flow.id, name))) newGroupFor = null;
   }
 
   function toggleFlow(flow: QAFlow) {
@@ -368,10 +454,11 @@
     openFlows = new Set([...openFlows, flow.id]);
   }
 
-  function addFlow() {
+  function addFlow(group = '') {
     const flow: QAFlow = {
       id: crypto.randomUUID(),
       name: 'Flow baru',
+      ...(group ? { stage: group } : {}),
       description: '',
       category: 'happy-path',
       taskTitles: [],
@@ -380,7 +467,7 @@
       steps: [{ id: crypto.randomUUID(), name: 'Step 1', service: services[0], request: { method: 'GET', path: '/health' }, assertions: [{ type: 'status', op: 'equals', expected: 200 }] }],
     };
     suite = suite ?? { projectId: project.id, projectName: project.name, flows: [], updatedAt: new Date().toISOString() };
-    suite.flows = [...suite.flows, flow];
+    suite = withGroups({ ...suite, flows: [...suite.flows, flow] });
     startEdit(flow);
   }
 
@@ -471,7 +558,8 @@
       return body;
     }
   };
-  const stepKey = (flowId: string, s: QAStepResult) => `${flowId}:${s.stepId}`;
+  // By position: a run's steps never reorder, and older runs can repeat a step id.
+  const stepKey = (flowId: string, i: number) => `${flowId}:${i}`;
 </script>
 
 <div class="e2e">
@@ -575,13 +663,17 @@
           <p>{suite.notes}</p>
         </details>
       {/if}
-      {#if !suite?.flows.length}
+      {#if !suite?.flows.length && !suite?.groups?.length}
         <div class="empty muted">
           <Icon name="list" size={24} />
           <p>Belum ada skenario. Klik <strong>Generate</strong> untuk membuat dari Detail Task, atau tambah manual.</p>
-          <button class="btn btn-sm" onclick={addFlow}><Icon name="plus" size={13} /> Tambah flow manual</button>
+          <div class="empty-actions">
+            <button class="btn btn-sm" onclick={() => addFlow()}><Icon name="plus" size={13} /> Tambah flow manual</button>
+            <button class="btn btn-sm" class:btn-primary={newGroupOpen} onclick={() => (newGroupOpen = !newGroupOpen)}><Icon name="plus" size={13} /> Grup baru</button>
+          </div>
         </div>
-      {:else}
+        {#if newGroupOpen}{@render groupForm()}{/if}
+      {:else if suite}
         <div class="list-tools">
           <label class="flow-search">
             <Icon name="search" size={13} />
@@ -596,8 +688,10 @@
           <button class="btn btn-ghost btn-sm" onclick={() => setAll(false)}>Kosongkan</button>
           <span class="grow"></span>
           <button class="btn btn-sm" class:btn-primary={fixOpen} onclick={() => (fixOpen ? (fixOpen = false) : openFix())} disabled={pipelineBusy} title="AI memperbaiki test case sesuai instruksimu (membaca kode, hanya baca)"><Icon name="sparkles" size={13} /> Perbaiki dengan AI</button>
-          <button class="btn btn-sm" onclick={addFlow}><Icon name="plus" size={13} /> Flow manual</button>
+          <button class="btn btn-sm" class:btn-primary={newGroupOpen} onclick={() => (newGroupOpen = !newGroupOpen)} title="Grup untuk mengelompokkan test case (urutan grup = urutan run)"><Icon name="plus" size={13} /> Grup baru</button>
+          <button class="btn btn-sm" onclick={() => addFlow()}><Icon name="plus" size={13} /> Flow manual</button>
         </div>
+        {#if newGroupOpen}{@render groupForm()}{/if}
         {#if suite.undo?.flows.length}
           <div class="undo-bar small">
             <Icon name="history" size={13} />
@@ -635,16 +729,50 @@
             </div>
           </section>
         {/if}
-        {#if !visibleFlows.length}
+        {#if searching && !visibleFlows.length}
           <p class="muted small">Tidak ada test case yang cocok. <button class="link-btn" onclick={() => { flowQuery = ''; flowCategory = ''; }}>Reset pencarian</button></p>
         {/if}
-        {#each visibleFlows as flow, fi (flow.id)}
-          {#if flow.stage && flow.stage !== visibleFlows[fi - 1]?.stage}
-            <h4 class="stage-head">{flow.stage}</h4>
+        {#each shownGroups as group, gi (group.name)}
+          {@const check = groupCheck(suite.flows, group.name)}
+          <div class="group-head">
+            <input
+              type="checkbox"
+              checked={check.state === 'all'}
+              indeterminate={check.state === 'some'}
+              disabled={!check.total}
+              onchange={() => toggleGroup(group.name, check.state !== 'all')}
+              aria-label="Centang semua flow di grup {group.name || UNGROUPED_LABEL}"
+            />
+            {#if group.name && renaming === group.name}
+              <form class="rename" onsubmit={(e) => { e.preventDefault(); void saveRename(group.name); }}>
+                <input class="input" bind:value={renameText} maxlength="120" aria-label="Nama grup" {@attach focusNow} onkeydown={(e) => e.key === 'Escape' && (renaming = null)} />
+                <button class="btn btn-primary btn-sm" type="submit" disabled={!renameText.trim()}>Simpan</button>
+                <button class="btn btn-ghost btn-sm" type="button" onclick={() => (renaming = null)}>Batal</button>
+              </form>
+            {:else}
+              <h4 class="stage-head" class:loose={!group.name}>{group.name || UNGROUPED_LABEL}</h4>
+            {/if}
+            <span class="muted small count" title="Flow yang dicentang untuk dijalankan">{check.checked}/{check.total}</span>
+            <span class="grow"></span>
+            <span class="flow-actions">
+              <button class="btn btn-ghost btn-sm" onclick={() => addFlow(group.name)} title="Tambah flow manual di grup ini" aria-label="Tambah flow di grup {group.name || UNGROUPED_LABEL}"><Icon name="plus" size={13} /></button>
+              {#if group.name}
+                <button class="btn btn-ghost btn-sm order-btn" onclick={() => changeGroups((s) => moveGroup(s, group.name, -1))} disabled={groupNames[0] === group.name || searching} title="Naikkan grup (urutan run)" aria-label="Naikkan grup">↑</button>
+                <button class="btn btn-ghost btn-sm order-btn" onclick={() => changeGroups((s) => moveGroup(s, group.name, 1))} disabled={groupNames.at(-1) === group.name || searching} title="Turunkan grup (urutan run)" aria-label="Turunkan grup">↓</button>
+                <button class="btn btn-ghost btn-sm" onclick={() => startRename(group.name)} title="Ganti nama grup" aria-label="Ganti nama grup"><Icon name="edit" size={13} /></button>
+                <button class="btn btn-ghost btn-sm" onclick={() => deleteGroup(group.name)} title="Hapus grup (flow-nya pindah ke {UNGROUPED_LABEL})" aria-label="Hapus grup"><Icon name="trash" size={13} /></button>
+              {/if}
+            </span>
+          </div>
+          {#if !group.flows.length}
+            <p class="muted small group-empty">Grup ini masih kosong. Pindahkan flow ke sini lewat pilihan grup di kartu flow, atau tambah flow dengan tombol +.</p>
           {/if}
+          {#each group.flows as flow (flow.id)}
+          {@const edge = edgeOfGroup(suite, flow.id)}
           <article class="card flow" class:disabled={!flow.enabled}>
             <div class="flow-head">
               <input type="checkbox" checked={flow.enabled} onchange={() => toggleFlow(flow)} aria-label="Ikut dijalankan" />
+              <span class="flow-meta">
               <button class="flow-title" onclick={() => (openFlows = toggle(openFlows, flow.id))} aria-expanded={openFlows.has(flow.id)} aria-label="Detail flow {flow.name}">
                 <Icon name="chevron" size={13} />
                 <strong>{flow.name}</strong>
@@ -660,14 +788,31 @@
               {#if flow.repairNote}
                 <span class="badge st-run" title={flow.repairNote}><Icon name="edit" size={11} /> diperbaiki agent</span>
               {/if}
-              <span class="grow"></span>
-              <button class="btn btn-ghost btn-sm order-btn" onclick={() => moveFlow(flow, -1)} disabled={suite.flows[0]?.id === flow.id} title="Naikkan (urutan journey)" aria-label="Naikkan">↑</button>
-              <button class="btn btn-ghost btn-sm order-btn" onclick={() => moveFlow(flow, 1)} disabled={suite.flows.at(-1)?.id === flow.id} title="Turunkan (urutan journey)" aria-label="Turunkan">↓</button>
+              </span>
+              <span class="flow-actions">
+              <select class="input group-pick" value={flow.stage ?? ''} onchange={(e) => pickGroup(flow, e.currentTarget)} title="Pindah ke grup" aria-label="Grup flow {flow.name}">
+                {#each groupNames as g (g)}<option value={g}>{g}</option>{/each}
+                <option value="">{UNGROUPED_LABEL}</option>
+                <option value={NEW_GROUP}>+ Grup baru…</option>
+              </select>
+              <button class="btn btn-ghost btn-sm order-btn" onclick={() => moveFlow(flow, -1)} disabled={edge.first} title="Naikkan di dalam grup (urutan journey)" aria-label="Naikkan">↑</button>
+              <button class="btn btn-ghost btn-sm order-btn" onclick={() => moveFlow(flow, 1)} disabled={edge.last} title="Turunkan di dalam grup (urutan journey)" aria-label="Turunkan">↓</button>
               <button class="btn btn-ghost btn-sm" onclick={() => run([flow.id])} disabled={running || starting} title="Jalankan flow ini saja"><Icon name="play" size={13} /></button>
               <button class="btn btn-ghost btn-sm" onclick={() => openFix(flow.id)} disabled={pipelineBusy} title="Perbaiki test case ini dengan AI"><Icon name="sparkles" size={13} /></button>
               <button class="btn btn-ghost btn-sm" onclick={() => startEdit(flow)} title="Edit test case"><Icon name="edit" size={13} /></button>
               <button class="btn btn-ghost btn-sm" onclick={() => removeFlow(flow)} title="Hapus flow"><Icon name="trash" size={13} /></button>
+              </span>
             </div>
+            {#if newGroupFor === flow.id}
+              <form class="group-form" onsubmit={(e) => { e.preventDefault(); void moveToNewGroup(flow); }}>
+                <label class="field grow">
+                  <span>Pindahkan ke grup baru</span>
+                  <input class="input" bind:value={newGroupForName} maxlength="120" placeholder="Nama grup" {@attach focusNow} />
+                </label>
+                <button class="btn btn-primary btn-sm" type="submit" disabled={!newGroupForName.trim()}>Pindahkan</button>
+                <button class="btn btn-ghost btn-sm" type="button" onclick={() => (newGroupFor = null)}>Batal</button>
+              </form>
+            {/if}
             {#if openFlows.has(flow.id)}
               {#if flow.description}<p class="desc">{flow.description}</p>{/if}
               {#if flow.warnings?.length}
@@ -682,6 +827,7 @@
                   serviceUrls={selectedEnv?.services ?? {}}
                   taskTitles={tasks.map((t) => t.title)}
                   databases={(selectedEnv?.databases ?? []).map((d) => d.name)}
+                  groups={groupNames}
                   onsave={saveFlow}
                   oncancel={cancelEdit}
                 />
@@ -725,6 +871,7 @@
               {/if}
             {/if}
           </article>
+          {/each}
         {/each}
       {/if}
     {:else}
@@ -783,9 +930,9 @@
               <span class="chip">{QA_CATEGORY_LABELS[flow.category]}</span>
             </div>
             <ol class="steps">
-              {#each flow.steps as s (s.stepId)}
+              {#each flow.steps as s, si (si)}
                 <li class="result">
-                  <button class="step-line clickable" onclick={() => (openSteps = toggle(openSteps, stepKey(flow.flowId, s)))} aria-expanded={openSteps.has(stepKey(flow.flowId, s))}>
+                  <button class="step-line clickable" onclick={() => (openSteps = toggle(openSteps, stepKey(flow.flowId, si)))} aria-expanded={openSteps.has(stepKey(flow.flowId, si))}>
                     <span class="badge {STATUS[s.status].cls}"><Icon name={STATUS[s.status].icon} size={11} /></span>
                     {#if s.request}<span class="method m-{s.request.method.toLowerCase()}">{s.request.method}</span>{/if}
                     <span class="step-name">{s.name}</span>
@@ -796,7 +943,7 @@
                   {#each s.assertions.filter((a) => !a.passed) as a, i (i)}
                     <p class="err small">✗ {a.message}</p>
                   {/each}
-                  {#if openSteps.has(stepKey(flow.flowId, s))}
+                  {#if openSteps.has(stepKey(flow.flowId, si))}
                     <div class="detail">
                       {#if s.assertions.length}
                         <ul class="assert-results small">
@@ -831,6 +978,17 @@
     {/if}
   </div>
 </div>
+
+{#snippet groupForm()}
+  <form class="group-form card" onsubmit={(e) => { e.preventDefault(); void createGroup(); }}>
+    <label class="field grow">
+      <span>Nama grup baru</span>
+      <input class="input" bind:value={newGroupName} maxlength="120" placeholder="mis. 5. Refund & pembatalan" {@attach focusNow} />
+    </label>
+    <button class="btn btn-primary btn-sm" type="submit" disabled={!newGroupName.trim()}>Buat grup</button>
+    <button class="btn btn-ghost btn-sm" type="button" onclick={() => (newGroupOpen = false)}>Batal</button>
+  </form>
+{/snippet}
 
 <E2ELogViewer bind:open={logOpen} bind:runId={logRunId} {runs} />
 <E2EEnvironmentModal bind:open={envModalOpen} bind:environments bind:selectedId={envId} {services} />
@@ -952,13 +1110,61 @@
   .suspect p {
     margin: 4px 0;
   }
-  .stage-head {
-    margin: 14px 0 6px;
-    padding-bottom: 4px;
+  /* A group: checkbox for all its flows, name, checked count, and its own buttons. */
+  .group-head {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    margin: 14px 0 2px;
+    padding: 0 0 4px 15px;
     border-bottom: 1px solid var(--border);
+  }
+  .stage-head {
+    margin: 0;
+    flex: 0 1 auto;
+    min-width: 0;
     font-size: 12.5px;
     color: var(--accent);
     letter-spacing: 0.02em;
+  }
+  .stage-head.loose {
+    color: var(--text-2, var(--text));
+  }
+  .group-head .count {
+    white-space: nowrap;
+  }
+  .group-empty {
+    margin: 2px 0 4px 15px;
+  }
+  .rename {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex: 1 1 260px;
+    min-width: 0;
+  }
+  .rename .input {
+    flex: 1;
+    min-width: 0;
+    padding: 4px 8px;
+    font-size: 12.5px;
+  }
+  .empty-actions {
+    display: flex;
+    gap: 8px;
+  }
+  .group-form {
+    display: flex;
+    align-items: flex-end;
+    gap: 8px;
+    margin-top: 8px;
+  }
+  .group-pick {
+    width: 150px;
+    padding: 3px 6px;
+    font-size: 11.5px;
+    margin-right: 4px;
   }
   .order-btn {
     padding-left: 6px;
@@ -1027,21 +1233,27 @@
     font: inherit;
     cursor: pointer;
   }
+  /* The page around it scrolls (ProjectsView .page-scroll); nothing in here is a small scroll box. */
   .e2e {
     display: flex;
     flex-direction: column;
     gap: 12px;
-    height: 100%;
-    overflow: hidden;
-    padding: 16px 22px;
+    padding: 0 22px 24px;
     box-sizing: border-box;
   }
+  /* Environment, Generate and Run stay in reach while scrolling through long lists. */
   .head {
+    position: sticky;
+    top: 0;
+    z-index: 5;
     display: flex;
     justify-content: space-between;
-    align-items: flex-start;
+    align-items: center;
     gap: 12px;
     flex-wrap: wrap;
+    padding: 12px 0 10px;
+    background: var(--bg);
+    border-bottom: 1px solid var(--border);
   }
   .head h2 {
     margin: 0 0 2px;
@@ -1097,8 +1309,6 @@
   }
   .gen {
     flex-shrink: 0;
-    max-height: 46%;
-    overflow-y: auto;
   }
   .gen h3 {
     margin: 0 0 8px;
@@ -1106,7 +1316,8 @@
   }
   .gen-grid {
     display: grid;
-    grid-template-columns: 1.4fr 1fr;
+    /* Side by side when there is room; stacked in a narrow window instead of a one-word-wide task list. */
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
     gap: 18px;
   }
   .gen-side {
@@ -1161,13 +1372,9 @@
     font-weight: 600;
   }
   .body {
-    flex: 1;
-    min-height: 0;
-    overflow-y: auto;
     display: flex;
     flex-direction: column;
     gap: 8px;
-    padding-right: 3px;
   }
   .empty {
     display: flex;
@@ -1198,6 +1405,23 @@
     align-items: center;
     gap: 8px;
     flex-wrap: wrap;
+  }
+  /* Title and badges wrap among themselves; the row's buttons stay on the right in one group. */
+  .flow-meta {
+    /* The title keeps at least ~260px; only on a narrow screen do the buttons move below it, together. */
+    flex: 1 1 260px;
+    min-width: 0;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+  .flow-actions {
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+    flex-shrink: 0;
+    margin-left: auto;
   }
   .flow-title {
     display: inline-flex;

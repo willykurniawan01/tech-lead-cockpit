@@ -275,6 +275,11 @@ export interface QASuite {
   projectId: string;
   projectName: string;
   flows: QAFlow[];
+  /**
+   * Group order in the Skenario tab, including groups that are still empty. A flow's group is its
+   * `stage`; groups only found on flows come after these (see src/lib/qa/groups.ts).
+   */
+  groups?: string[];
   /** Assumptions and open questions the AI noted while writing the flows. */
   notes?: string;
   generatedAt?: string;

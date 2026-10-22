@@ -1,10 +1,11 @@
 // @vitest-environment node
-import { mkdir, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { QAEnvironment, QAFlow } from '../../src/lib/qa/types.ts';
-import { buildQaPrompt, extractJson, normalizeEditedFlow, parseQaReply, repairJson } from './generator.ts';
+import { buildQaPrompt, dedupeStepIds, extractJson, normalizeEditedFlow, parseQaReply, repairJson } from './generator.ts';
+import { parseFix } from './plan.ts';
 import { QaManager, validateEnvironment } from './manager.ts';
 import { checkAssertion, interpolate, jsonPath, runFlow } from './runner.ts';
 
@@ -269,6 +270,34 @@ describe('generator', () => {
     expect(flow.steps.map((s) => s.id)).toEqual(['s1', 's2', 's3']);
   });
 
+  it('gives a copied step its own id (the UI keys steps by id)', () => {
+    const copied = { ...loginThenOrder, steps: [...loginThenOrder.steps, { ...loginThenOrder.steps[0], name: 'Login ulang' }] };
+    const ids = normalizeEditedFlow(copied).steps.map((s) => s.id);
+    expect(ids.slice(0, 3)).toEqual(['s1', 's2', 's3']);
+    expect(ids[3]).not.toBe('s1');
+    expect(new Set(ids).size).toBe(4);
+  });
+
+  it('keeps step ids unique when an AI fix copies or drops them', () => {
+    const fix = (steps: unknown[]) =>
+      parseFix(JSON.stringify({ flows: [{ ...loginThenOrder, steps }], changes: [{ flowId: 'f1', summary: 'ubah' }] }), [loginThenOrder]).fixed[0].flow.steps.map((s) => s.id);
+    // A copied step keeps the original's id on the first one only.
+    const copied = fix([...loginThenOrder.steps, { ...loginThenOrder.steps[0], name: 'Login ulang' }]);
+    expect(copied.slice(0, 3)).toEqual(['s1', 's2', 's3']);
+    expect(new Set(copied).size).toBe(4);
+    // A dropped id comes back from the original by position.
+    const { id: _id, ...noId } = loginThenOrder.steps[0];
+    expect(fix([{ ...noId, name: 'Login (diubah)' }, ...loginThenOrder.steps.slice(1)])).toEqual(['s1', 's2', 's3']);
+  });
+
+  it('heals duplicate step ids of a saved suite, keeping the first', () => {
+    const flows = [{ ...loginThenOrder, steps: [loginThenOrder.steps[0], loginThenOrder.steps[1], { ...loginThenOrder.steps[0] }] }];
+    expect(dedupeStepIds(flows)).toBe(true);
+    expect(flows[0].steps[0].id).toBe('s1');
+    expect(new Set(flows[0].steps.map((s) => s.id)).size).toBe(3);
+    expect(dedupeStepIds(flows)).toBe(false);
+  });
+
   it('builds a prompt with the tasks, categories and existing flows', () => {
     const prompt = buildQaPrompt({
       projectId: 'd',
@@ -366,6 +395,18 @@ describe('QaManager', () => {
     expect((await qa.listRuns('draft-1')).map((r) => r.id)).toEqual([run.id]);
     // Stored on disk too (a fresh manager still sees it).
     expect((await manager().getRun('draft-1', run.id))?.status).toBe('done');
+  });
+
+  it('heals and saves a suite whose steps repeat an id', async () => {
+    const qa = manager();
+    const dup = { ...loginThenOrder, steps: [...loginThenOrder.steps, { ...loginThenOrder.steps[0] }] };
+    await mkdir(join(dir, 'suites'), { recursive: true });
+    await writeFile(join(dir, 'suites', 'proj-dup.json'), JSON.stringify({ projectId: 'proj-dup', flows: [dup], undo: { at: '', label: '', flows: [dup] } }));
+    const ids = (await qa.getSuite('proj-dup'))!.flows[0].steps.map((s) => s.id);
+    expect(new Set(ids).size).toBe(4);
+    const saved = JSON.parse(await readFile(join(dir, 'suites', 'proj-dup.json'), 'utf8'));
+    expect(saved.flows[0].steps.map((s: { id: string }) => s.id)).toEqual(ids);
+    expect(new Set(saved.undo.flows[0].steps.map((s: { id: string }) => s.id)).size).toBe(4);
   });
 
   it('lets a project adopt the per-TAD suites and runs from before projects existed', async () => {

@@ -334,11 +334,34 @@ export function normalizeEditedFlow(raw: unknown): QAFlow {
   if (r.enabled === false) flow.enabled = false;
   if (typeof r.repairNote === 'string' && r.repairNote.trim()) flow.repairNote = r.repairNote.trim().slice(0, 2_000);
   const rawSteps = Array.isArray(r.steps) ? r.steps : [];
+  // A copied step (by hand or by an AI fix) brings its source's id: only the first keeps it.
+  const used = new Set<string>();
   flow.steps.forEach((s, i) => {
     const id = (rawSteps[i] as { id?: unknown } | undefined)?.id;
-    if (typeof id === 'string' && /^[\w-]{1,64}$/.test(id)) s.id = id;
+    if (typeof id === 'string' && /^[\w-]{1,64}$/.test(id) && !used.has(id)) s.id = id;
+    used.add(s.id);
   });
   return flow;
+}
+
+/**
+ * Gives a fresh id to every step that repeats an earlier step's id in its flow (suites saved before
+ * normalizeEditedFlow checked this). The first one keeps it, so its run results still match.
+ * True when something changed.
+ */
+export function dedupeStepIds(flows: QAFlow[]): boolean {
+  let changed = false;
+  for (const flow of flows) {
+    const used = new Set<string>();
+    for (const step of flow.steps) {
+      if (used.has(step.id)) {
+        step.id = randomUUID();
+        changed = true;
+      }
+      used.add(step.id);
+    }
+  }
+  return changed;
 }
 
 export function parseQaReply(reply: string, taskTitles: string[]): { flows: QAFlow[]; notes?: string } {

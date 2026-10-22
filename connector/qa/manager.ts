@@ -6,7 +6,8 @@ import type { AiSelection } from '../../src/lib/ai/types.ts';
 import type { QAAgentJob, QADatabase, QADbConnection, QADbResult, QADbServer, QAEnvironment, QAPipeline, QAPlan, QASuspect, QAFlow, QAFlowResult, QAGenerateJob, QAGenerateRequest, QARun, QARunRequest, QASuite } from '../../src/lib/qa/types.ts';
 import { listDatabases, QaDbError, queryReadOnly, schemaSummary, testConnection } from './db.ts';
 import { matchDatabases } from '../../src/lib/qa/db-match.ts';
-import { buildQaPrompt, parseQaReply, QA_SYSTEM_PROMPT } from './generator.ts';
+import { buildQaPrompt, dedupeStepIds, parseQaReply, QA_SYSTEM_PROMPT } from './generator.ts';
+import { arrangeFlows, groupOrder } from '../../src/lib/qa/groups.ts';
 import { buildFixPrompt, buildPlanPrompt, buildRepairPrompt, checkFlowsAgainstPlan, evidenceMentions, FIX_SYSTEM_PROMPT, parseFix, parsePlan, parseRepair, PLAN_SYSTEM_PROMPT, REPAIR_SYSTEM_PROMPT } from './plan.ts';
 import { verifyEvidence } from '../trace/verify.ts';
 import { runFlow, summarize } from './runner.ts';
@@ -366,7 +367,12 @@ export class QaManager {
   private suiteFile = (projectId: string) => join(this.dir, 'suites', `${this.projectId(projectId)}.json`);
 
   async getSuite(projectId: string): Promise<QASuite | null> {
-    return (await this.read<QASuite>(this.suiteFile(projectId))) ?? null;
+    const suite = await this.read<QASuite>(this.suiteFile(projectId));
+    if (!suite) return null;
+    // Steps keyed by id in the UI and in run results must be unique; heal older suites once.
+    const healed = dedupeStepIds(suite.flows ?? []);
+    if (dedupeStepIds(suite.undo?.flows ?? []) || healed) await this.write(this.suiteFile(projectId), suite);
+    return suite;
   }
 
   /**
@@ -730,7 +736,10 @@ export class QaManager {
       const ordered = plan.stages.flatMap((st) => written.get(st.id) ?? byStage.get(st.title) ?? []);
       const now = new Date().toISOString();
       const prev = await this.getSuite(projectId);
-      await this.saveSuite({ ...(prev ?? {}), projectId, projectName: plan.projectName, flows: checkFlowsAgainstPlan([...ordered, ...others], plan), generatedAt: now, ai, updatedAt: now });
+      // Groups the user saved (made, renamed, reordered) keep their place; stages not among them follow in
+      // plan order. The saved list itself is left as is, so a stage that finishes first doesn't fix the order.
+      const flows = arrangeFlows([...ordered, ...others], groupOrder({ groups: prev?.groups, flows: [...ordered, ...others] }));
+      await this.saveSuite({ ...(prev ?? {}), projectId, projectName: plan.projectName, flows: checkFlowsAgainstPlan(flows, plan), generatedAt: now, ai, updatedAt: now });
     };
 
     void (async () => {

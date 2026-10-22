@@ -217,14 +217,14 @@
     padding: 4px 10px;
     font-size: 12px;
   }
-  /* A long list scrolls inside the card, so the page around it keeps its place. */
+  /* A long list scrolls inside the card (most of the screen), so the page around it keeps its place. */
   .scroll {
-    max-height: 360px;
+    max-height: 70vh;
     overflow-y: auto;
     padding-right: 4px;
   }
   .done ul {
-    max-height: 220px;
+    max-height: 40vh;
     overflow-y: auto;
   }
   .name {

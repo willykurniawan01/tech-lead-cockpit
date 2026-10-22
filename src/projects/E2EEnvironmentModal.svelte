@@ -25,6 +25,8 @@
   let headersText = $state('');
   let variablesText = $state('');
   let secretVarsText = $state('');
+  /** Lists grow with their content (22 services, dozens of variables) instead of a 4-line box. */
+  const rowsFor = (text: string, min: number, max = 18) => Math.min(max, Math.max(min, text.split('\n').length + 1));
   let secretVarsInitial = '';
   let secret = $state('');
   let clearSecret = $state(false);
@@ -206,7 +208,7 @@
   const secretLabel = $derived(editing?.auth.type === 'basic' ? 'Password' : 'Token');
 </script>
 
-<Modal bind:open title="Environment E2E" subtitle="Server tujuan test: base URL per service, header, variabel, dan auth" width={760} onclose={() => (editing = null)}>
+<Modal bind:open title="Environment E2E" subtitle="Server tujuan test: base URL per service, header, variabel, dan auth" width={1080} onclose={() => (editing = null)}>
   {#if !editing}
     <div class="env-list">
       {#if !environments.length}
@@ -244,24 +246,24 @@
 
       <label class="field">
         <span>Base URL per service <em class="muted">(satu per baris: <code>nama-service = https://…</code>; kosong = pakai default)</em></span>
-        <textarea class="input mono" rows="5" bind:value={servicesText} placeholder="core-payment = https://payment-staging.internal.net&#10;merchant-service = http://localhost:8081"></textarea>
+        <textarea class="input mono" rows={rowsFor(servicesText, 6)} bind:value={servicesText} placeholder="core-payment = https://payment-staging.internal.net&#10;merchant-service = http://localhost:8081"></textarea>
       </label>
-
-      <div class="grid2">
-        <label class="field">
-          <span>Header default <em class="muted">(<code>Nama: nilai</code>)</em></span>
-          <textarea class="input mono" rows="4" bind:value={headersText}></textarea>
-        </label>
-        <label class="field">
-          <span>Variabel <em class="muted">(<code>nama = nilai</code>, dipakai sebagai <code>{'{{nama}}'}</code>)</em></span>
-          <textarea class="input mono" rows="4" bind:value={variablesText} placeholder="merchantId = M-0001&#10;username = qa.tester"></textarea>
-        </label>
-      </div>
 
       <label class="field">
-        <span>Variabel rahasia <em class="muted">(kredensial uji, PIN, OTP statis: <code>nama = nilai</code>; disimpan di Keychain dan disamarkan di hasil. Nilai kosong = tetap pakai yang tersimpan, hapus baris = hapus variabel)</em></span>
-        <textarea class="input mono" rows="3" bind:value={secretVarsText} placeholder="password = …&#10;pin = …" autocomplete="off" spellcheck="false"></textarea>
+        <span>Variabel <em class="muted">(<code>nama = nilai</code>, dipakai sebagai <code>{'{{nama}}'}</code>)</em></span>
+        <textarea class="input mono" rows={rowsFor(variablesText, 6)} bind:value={variablesText} placeholder="merchantId = M-0001&#10;username = qa.tester"></textarea>
       </label>
+
+      <div class="grid2 align-end">
+        <label class="field">
+          <span>Header default <em class="muted">(<code>Nama: nilai</code>)</em></span>
+          <textarea class="input mono" rows={rowsFor(headersText, 4, 12)} bind:value={headersText}></textarea>
+        </label>
+        <label class="field">
+          <span>Variabel rahasia <em class="muted">(kredensial uji, PIN, OTP statis: <code>nama = nilai</code>; disimpan di Keychain dan disamarkan di hasil. Nilai kosong = tetap pakai yang tersimpan, hapus baris = hapus variabel)</em></span>
+          <textarea class="input mono" rows={rowsFor(secretVarsText, 4, 12)} bind:value={secretVarsText} placeholder="password = …&#10;pin = …" autocomplete="off" spellcheck="false"></textarea>
+        </label>
+      </div>
 
       <div class="grid3">
         <label class="field">
@@ -417,6 +419,10 @@
   }
   .grid3 {
     grid-template-columns: repeat(3, 1fr);
+  }
+  /* Labels of different length side by side: line the boxes up instead. */
+  .grid2.align-end {
+    align-items: end;
   }
   .field {
     display: flex;

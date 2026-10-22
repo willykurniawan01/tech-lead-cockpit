@@ -55,6 +55,7 @@ import { bugDraftId, type BugAnalyzeRequest, type BugCaseInput, type BugChatRequ
 
 const manualMrs = new ManualMrs();
 import type { QAEnvironment, QAGenerateRequest, QAPlan, QARunRequest, QASuite } from '../src/lib/qa/types.ts';
+import { normalizeGroups, withGroups } from '../src/lib/qa/groups.ts';
 import { isAiSelection, type AiSelection } from '../src/lib/ai/types.ts';
 import { isValidDraftId } from './generator-runner.ts';
 import { DraftFileError, DraftFiles } from './drafts-store.ts';
@@ -1084,7 +1085,9 @@ async function handleQa(route: string, url: URL, req: IncomingMessage, res: Serv
       // Warnings are recomputed against the journey plan (an edit may have fixed the path).
       const plan = await qa.getPlan(String(suite.projectId ?? '')).catch(() => null);
       const suspects = Array.isArray(suite.suspects) ? suite.suspects.slice(0, 50) : undefined;
-      return send(res, 200, { suite: await qa.saveSuite({ ...suite, suspects, flows: plan ? checkFlowsAgainstPlan(flows, plan) : flows, projectName: String(suite.projectName ?? '').slice(0, 300) }) });
+      // Groups: cleaned names, and flows stored in the order they are shown and run.
+      const grouped = withGroups({ ...suite, flows, groups: normalizeGroups(suite.groups) });
+      return send(res, 200, { suite: await qa.saveSuite({ ...grouped, suspects, flows: plan ? checkFlowsAgainstPlan(grouped.flows, plan) : grouped.flows, projectName: String(suite.projectName ?? '').slice(0, 300) }) });
     }
     if (route === 'POST /qa/generate') {
       const body = await readJson<QAGenerateRequest>(req, 4 * 1024 * 1024);

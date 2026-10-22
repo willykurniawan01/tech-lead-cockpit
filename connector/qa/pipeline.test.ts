@@ -163,6 +163,29 @@ describe('E2E multi-agent pipeline', () => {
     expect((await m.getSuite('proj'))?.flows.map((f) => f.name)).toEqual(['Create v1', 'Reserve v2']);
   });
 
+  it('keeps manual groups, empty groups and their order when a stage is rewritten', async () => {
+    const m = manager();
+    await m.startPlan(REQ);
+    await settle(m);
+    reply = (p) => (p.includes('tahap "1. Buat promo"') ? flowsReply('Create v1', '/v1/cms/promo') : flowsReply('Reserve v1', '/v1/promo/1/reserve'));
+    await m.writeFromPlan('proj', { concurrency: 3 });
+    await settle(m);
+    // The user puts a manual group first, keeps an empty one, and moves stage 2 above stage 1.
+    const manual = { id: 'm', name: 'Setup manual', description: '', category: 'happy-path', taskTitles: [], enabled: true, stage: '0. Setup', steps: [{ id: 'x', name: 'x', request: { method: 'GET', path: '/x' }, assertions: [] }] } as QAFlow;
+    const current = (await m.getSuite('proj'))!;
+    await m.saveSuite({ ...current, groups: ['0. Setup', 'Kosong', '2. Reserve promo', '1. Buat promo'], flows: [manual, ...current.flows] });
+    reply = () => flowsReply('Reserve v2', '/v1/promo/1/reserve');
+    await m.writeFromPlan('proj', { stageIds: ['s2'] });
+    await settle(m);
+    const suite = (await m.getSuite('proj'))!;
+    expect(suite.groups).toEqual(['0. Setup', 'Kosong', '2. Reserve promo', '1. Buat promo']);
+    expect(suite.flows.map((f) => [f.name, f.stage])).toEqual([
+      ['Setup manual', '0. Setup'],
+      ['Reserve v2', '2. Reserve promo'],
+      ['Create v1', '1. Buat promo'],
+    ]);
+  });
+
   it('refuses a second batch while agents run, and cancels queued agents', async () => {
     const m = manager();
     await m.startPlan(REQ);

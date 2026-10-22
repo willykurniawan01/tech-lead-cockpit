@@ -299,9 +299,16 @@ export function parseFix(reply: string, originals: QAFlow[]): FixResult {
     } catch {
       continue;
     }
-    // Step ids the AI dropped come back from the original by position (results and logs refer to them).
+    // Step ids the AI dropped come back from the original by position (results and logs refer to them),
+    // unless another step in the flow already has that id.
+    const used = new Set(flow.steps.map((s) => s.id));
     flow.steps.forEach((s, i) => {
-      if (!original.steps.some((o) => o.id === s.id) && original.steps[i]) s.id = original.steps[i].id;
+      const prev = original.steps[i]?.id;
+      if (prev && !original.steps.some((o) => o.id === s.id) && !used.has(prev)) {
+        used.delete(s.id);
+        s.id = prev;
+        used.add(prev);
+      }
     });
     const out: QAFlow = { ...flow, ...(original.stage ? { stage: original.stage } : {}) };
     if (sameFlow(out, original)) continue;

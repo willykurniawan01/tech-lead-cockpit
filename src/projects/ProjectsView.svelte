@@ -295,7 +295,7 @@
     {/each}
   </aside>
 
-  <section class="main">
+  <section class="main" class:page-scroll={current && tab === 'e2e'}>
     {#if !loaded}
       <div class="empty muted">Memuat proyek…</div>
     {:else if !current}
@@ -623,6 +623,14 @@
     flex: 1;
     min-height: 0;
     overflow: hidden;
+  }
+  /* E2E test settings need room: the whole column scrolls, so the project header scrolls away. */
+  .main.page-scroll {
+    display: block;
+    overflow-y: auto;
+  }
+  .main.page-scroll .panel {
+    overflow: visible;
   }
   .grow {
     flex: 1;

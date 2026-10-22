@@ -43,10 +43,11 @@ sequenceDiagram
 ### Frontend (`src/projects/` & `src/lib/qa/`)
 | File Path | Komponen | Deskripsi & Tanggung Jawab |
 |---|---|---|
-| [`src/projects/E2EPanel.svelte`](file:///Users/ridwan/mine/tech-lead-cockpit/src/projects/E2EPanel.svelte) | Panel Pengujian E2E | Antarmuka pembuatan test suite, daftar skenario uji, tombol run, dan ringkasan eksekusi test. |
-| [`src/projects/E2EEnvironmentModal.svelte`](file:///Users/ridwan/mine/tech-lead-cockpit/src/projects/E2EEnvironmentModal.svelte) | Modal Manajemen Environment | Pengaturan URL base, auth token, dan mock variables untuk environment pengujian (Staging, Development, Local). |
+| [`src/projects/E2EPanel.svelte`](file:///Users/ridwan/mine/tech-lead-cockpit/src/projects/E2EPanel.svelte) | Panel Pengujian E2E | Antarmuka pembuatan test suite, daftar skenario uji, tombol run, dan ringkasan eksekusi test. Di tab E2E Test, seluruh kolom halaman Proyek ikut scroll (`.page-scroll` di `ProjectsView`). Header proyek ikut tergulung, baris judul E2E (environment, Generate, Jalankan) menempel di atas, dan tidak ada kotak scroll kecil di dalam panel. Tombol aksi kartu flow (`.flow-actions`) tetap di baris judul; judul dan badge membungkus di `.flow-meta`. |
+| [`src/projects/E2EEnvironmentModal.svelte`](file:///Users/ridwan/mine/tech-lead-cockpit/src/projects/E2EEnvironmentModal.svelte) | Modal Manajemen Environment | Pengaturan URL base, auth token, dan mock variables untuk environment pengujian (Staging, Development, Local). Modal selebar 1080px. Base URL per service dan Variabel masing-masing selebar penuh, dan tinggi textarea mengikuti jumlah baris (`rowsFor`, 6–18 baris). |
 | [`src/lib/qa/client.ts`](file:///Users/ridwan/mine/tech-lead-cockpit/src/lib/qa/client.ts) | QA API Client | Penghubung antarmuka UI dengan endpoint connector `/api/connector/qa/*`. |
-| [`src/lib/qa/types.ts`](file:///Users/ridwan/mine/tech-lead-cockpit/src/lib/qa/types.ts) | Definisi Tipe Data QA | Schema untuk `QASuite`, `QAScenario`, `QAStep`, `QAEnvironment`, dan `QARunResult`. |
+| [`src/lib/qa/types.ts`](file:///Users/ridwan/mine/tech-lead-cockpit/src/lib/qa/types.ts) | Definisi Tipe Data QA | Schema untuk `QASuite` (termasuk `groups`), `QAScenario`, `QAStep`, `QAEnvironment`, dan `QARunResult`. |
+| [`src/lib/qa/groups.ts`](../../../src/lib/qa/groups.ts) | Grup Test Case | Fungsi murni untuk grup di tab Skenario: urutan grup, tampilan per grup, status centang grup, tambah/ganti nama/hapus/urutkan grup, pindah flow antar grup dan di dalam grup. Dipakai UI dan connector. Test di [`groups.test.ts`](../../../src/lib/qa/groups.test.ts). |
 
 ### Backend Connector (`connector/qa/`)
 | File Path | Komponen | Deskripsi & Tanggung Jawab |
@@ -81,11 +82,31 @@ Assertion `equals`/`contains`/`gt`/… tanpa nilai harapan gagal dengan pesan "n
 
 ---
 
+## 🗂️ Grup test case (tab Skenario)
+
+Grup sebuah flow adalah `flow.stage`: tahap dari rencana journey, atau grup yang dibuat sendiri. Flow tanpa `stage` masuk **Tanpa grup**, yang selalu tampil paling bawah. `QASuite.groups` menyimpan urutan grup, termasuk grup yang masih kosong. Grup yang hanya ada di flow (belum tersimpan di `groups`) menyusul sesuai urutan kemunculannya (`groupOrder`).
+
+- **Checklist per grup.** Tiap judul grup punya checkbox tiga keadaan: semua, sebagian (`indeterminate`), atau kosong (`groupCheck`). Di sebelahnya ada hitungan dicentang/total (mis. `3/5`). Mengklik checkbox grup mencentang atau mengosongkan semua flow di grup itu (`setGroupEnabled`). Hitungan selalu atas semua flow di grup, juga saat pencarian aktif. Tombol **Jalankan N flow** mengikuti centangan.
+- **Grup manual.**
+  - **Grup baru** (di toolbar, juga di tampilan kosong) membuat grup kosong. Grup kosong tetap tampil, kecuali saat pencarian aktif.
+  - Tiap grup punya tombol + (flow manual di grup itu), ↑/↓ (urutan grup), ganti nama, dan hapus. Menghapus grup memindahkan flow-nya ke Tanpa grup; flow-nya tidak ikut terhapus.
+  - Nama dirapikan (`cleanGroupName`, maks 120 karakter, satu baris). Nama tidak boleh kosong, kembar (tanpa beda huruf besar/kecil), atau "Tanpa grup".
+- **Pindah flow.**
+  - Dropdown grup di kartu flow memindahkan flow ke grup lain, ke Tanpa grup, atau ke **+ Grup baru…**. Flow yang dipindah masuk di akhir grup tujuan.
+  - Di FlowEditor, isian **Grup** menawarkan grup yang ada (datalist); mengetik nama baru membuat grup baru.
+  - ↑/↓ di kartu hanya memindah flow di dalam grupnya (`moveFlowInGroup`).
+- **Urutan run = urutan tampil.** Setiap perubahan grup menata ulang `suite.flows` per grup (`withGroups`/`arrangeFlows`), lalu urutan di dalam grup tetap. Runner menjalankan flow sesuai urutan itu.
+- **Connector.** `POST /qa/suite` membersihkan `groups` (`normalizeGroups`) dan menata ulang flow (`withGroups`) sebelum menyimpan. Saat agent penulis menggabungkan tahap (`writeFromPlan` → `merge`), urutan grup yang tersimpan dipakai. Tahap rencana yang belum ada di `groups` menyusul dalam urutan rencana, dan `groups` sendiri tidak ditimpa oleh merge, supaya tahap yang selesai duluan tidak mengunci urutan.
+- **Kompatibilitas rencana.**
+  - Agent penulis mengganti flow per **judul** tahap rencana. Grup manual dengan nama di luar rencana diperlakukan seperti flow manual: tidak pernah diganti.
+  - Ganti nama grup yang judulnya tahap rencana dikonfirmasi dulu. Bila tahap itu ditulis ulang, test case-nya masuk lagi ke grup bernama lama, dan flow di grup yang sudah diganti namanya tidak ikut diganti.
+  - Menghapus grup tahap rencana juga diberi peringatan yang sama.
+
 ## 🛠️ Perbaiki dengan AI (instruksi)
 
 Tombol **Perbaiki dengan AI** di daftar skenario (atau ikon ✨ per flow) membuka panel berisi instruksi bebas, preset (tipe data sesuai struct, test yang gagal di run terakhir, nama field/path sesuai kode), cakupan (yang dicentang, hasil pencarian, atau satu flow), dan pilihan AI. `QaManager.fixFlows` (`POST /qa/fix`) menjalankan agent peran `fix` per 5 flow (maksimal 80 flow), dengan concurrency pipeline. Prompt `buildFixPrompt` ([`connector/qa/plan.ts`](../../../connector/qa/plan.ts)) berisi instruksi, JSON flow, dan ringkasan hasil run terakhir tiap flow. Agent membaca struct/router/handler (hanya baca).
 
-`parseFix` hanya menerima flow dengan id yang dikirim. Id step dan `stage` dipertahankan, dan flow yang kembali tanpa perubahan diabaikan. Flow yang berubah diberi `repairNote` "Diperbaiki AI: …". Versi sebelumnya disimpan di `suite.undo` (satu tingkat). **Batalkan perbaikan** (`POST /qa/fix/undo`) mengembalikannya.
+`parseFix` hanya menerima flow dengan id yang dikirim. Id step dan `stage` dipertahankan, dan flow yang kembali tanpa perubahan diabaikan. Id step selalu unik dalam satu flow. Bila AI (atau edit manual) menyalin step beserta id-nya, hanya step pertama yang memakai id itu (`normalizeEditedFlow`). Pemulihan id per posisi juga tidak memakai id yang sudah dipakai. Suite lama yang sudah punya id dobel dipulihkan sekali saat dimuat (`dedupeStepIds` di `QaManager.getSuite`, lalu disimpan). Di tab Hasil Run, step diberi key berdasarkan posisi, karena run lama bisa mengulang `stepId`. Tanpa ini Svelte melempar `each_key_duplicate`. Flow yang berubah diberi `repairNote` "Diperbaiki AI: …". Versi sebelumnya disimpan di `suite.undo` (satu tingkat). **Batalkan perbaikan** (`POST /qa/fix/undo`) mengembalikannya.
 
 ---
 
