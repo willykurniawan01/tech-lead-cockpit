@@ -1276,9 +1276,6 @@
               {#if flow.warnings?.length}
                 <span class="badge st-warn" title={flow.warnings.join('\n')}><Icon name="alert" size={11} /> {flow.warnings.length} endpoint di luar rencana</span>
               {/if}
-              {#if flow.repairNote}
-                <span class="badge st-run" title={flow.repairNote}><Icon name="edit" size={11} /> diperbaiki agent</span>
-              {/if}
               </span>
               <span class="flow-actions">
               <select class="input group-pick" value={flow.stage ?? ''} onchange={(e) => pickGroup(flow, e.currentTarget)} title="Pindah ke grup" aria-label="Grup flow {flow.name}">
