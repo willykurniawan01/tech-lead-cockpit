@@ -20,6 +20,7 @@
   import { api } from '../lib/api-base';
   import type { GeneratorJob } from '../lib/generator/types';
   import { buildTadUpdatePrompt, collectFindings, FINDING_LABELS, likelyTad, type FindingKind } from '../lib/qa/tad-findings';
+  import { dbFillPlan, notReady } from '../lib/qa/db-fill';
   import { latestResults, resultBucket, resultCounts, type LatestResult, type ResultBucket } from '../lib/qa/latest';
   import { addGroup, cleanGroupName, edgeOfGroup, groupCheck, groupFlows, groupOrder, moveFlowInGroup, moveFlowToGroup, moveGroup, removeGroup, renameGroup, setGroupEnabled, UNGROUPED_LABEL, withGroups } from '../lib/qa/groups';
   import { QA_CATEGORIES, QA_CATEGORY_LABELS, type QACategory, type QAEnvironment, type QAFlow, type QAFlowResult, type QAGenerateJob, type QAGenerateRequest, type QAPipeline, type QAPlan, type QARun, type QASuspect, type QAStepResult, type QAStepStatus, type QASuite } from '../lib/qa/types';
@@ -631,9 +632,28 @@
   async function startFix() {
     if (!fixInstruction.trim() || !fixFlowIds.length) return;
     try {
-      pipeline = await qa.fixFlows(project.id, fixFlowIds, fixInstruction, ai);
+      pipeline = await qa.fixFlows(project.id, fixFlowIds, fixInstruction, ai, env?.id);
       fixOpen = false;
       toasts.show(`Agent perbaikan memeriksa ${fixFlowIds.length} test case di background (juga di Agent Tasks).`, 'ok');
+    } catch (e) {
+      toasts.show((e as Error).message, 'err');
+    }
+  }
+
+  // Every test case ready to execute: variables without a real value are filled from the services'
+  // databases by the fix agent (background, undoable), no manual values.
+  const MAX_FILL_FLOWS = 80;
+  const readiness = $derived(suite ? notReady(suite.flows, env) : new Map<string, string[]>());
+  const fillPlan = $derived(suite ? dbFillPlan(suite.flows, env) : null);
+  const envHasDb = $derived(Boolean(env?.databases?.length));
+  async function fillFromDb() {
+    if (!fillPlan || !env) return;
+    if (!fillPlan.flowIds.length) return toasts.show(fillPlan.manual.length ? 'Yang tersisa hanya kredensial; isi sekali di Variabel rahasia environment.' : 'Semua variabel sudah punya nilai.', 'info');
+    const ids = fillPlan.flowIds.slice(0, MAX_FILL_FLOWS);
+    try {
+      pipeline = await qa.fixFlows(project.id, ids, fillPlan.instruction, ai, env.id);
+      const rest = fillPlan.flowIds.length - ids.length;
+      toasts.show(`Agent mengisi ${fillPlan.vars.length} variabel dari database untuk ${ids.length} test case di background.${rest ? ` ${rest} test case lagi menyusul: klik lagi setelah selesai.` : ''}`, 'ok', 7000);
     } catch (e) {
       toasts.show((e as Error).message, 'err');
     }
@@ -1041,6 +1061,24 @@
   <div class="body">
     {#if tab === 'flows'}
       <!-- The keys the selected environment still needs for the flows that will run (inside the scroll area: it can be long). -->
+      {#if suite?.flows.length}
+        {#if !readiness.size}
+          <div class="banner ready-ok small"><Icon name="check" size={14} /> Semua {suite.flows.length} test case siap dijalankan: setiap variabel punya nilai{env ? ` di ${env.name}` : ''}.</div>
+        {:else}
+          <div class="banner ready-todo small">
+            <Icon name="alert" size={14} />
+            <span>
+              <strong>{readiness.size} dari {suite.flows.length} test case belum siap dijalankan</strong>: {fillPlan?.vars.length ?? 0} variabel belum punya nilai asli{fillPlan?.manual.length ? `, ${fillPlan.manual.length} kredensial (${fillPlan.manual.map((v) => v.name).join(', ')}) diisi sekali di Variabel rahasia environment` : ''}.
+              {#if !envHasDb}<span class="muted"> Tambahkan database di environment agar bisa diisi otomatis.</span>{/if}
+            </span>
+            {#if envHasDb && fillPlan?.flowIds.length}
+              <button class="btn btn-sm btn-primary" onclick={fillFromDb} disabled={pipelineBusy} title="Agent membaca skema database service terkait dan menambahkan query data (SELECT, read-only) ke test case yang memakai variabel itu. Bisa dibatalkan."><Icon name="sparkles" size={13} /> Isi otomatis dari database</button>
+            {:else if !envHasDb}
+              <button class="btn btn-sm" onclick={() => (envModalOpen = true)}>Atur database</button>
+            {/if}
+          </div>
+        {/if}
+      {/if}
       <E2ERequirements flows={enabledFlows} {env} bind:environments onopenenv={() => (envModalOpen = true)} />
       {#if suite?.notes}
         <details class="notes card">
@@ -1191,6 +1229,9 @@
               {#if fixByFlow.get(flow.id)}
                 {@const fx = fixByFlow.get(flow.id)!}
                 <button class="badge fix-badge" class:st-run={CODER_ACTIVE.includes(fx.status)} class:st-ok={fx.status === 'ready' || fx.status === 'pushed' || fx.status === 'completed'} class:st-warn={fx.status === 'needs-input'} class:st-err={fx.status === 'failed'} onclick={() => document.getElementById('e2e-code-fixes')?.scrollIntoView({ behavior: 'smooth', block: 'start' })} title="Perbaikan kode oleh coder agent ({fx.repo} · {fx.branch}). Klik untuk ke panel Perbaikan kode."><Icon name="code" size={11} /> Perbaikan kode: {CODER_LABEL[fx.status] ?? fx.status}</button>
+              {/if}
+              {#if readiness.get(flow.id)}
+                <span class="badge st-warn" title="Belum punya nilai: {readiness.get(flow.id)!.join(', ')}"><Icon name="alert" size={11} /> Belum siap · {readiness.get(flow.id)!.length} variabel</span>
               {/if}
               {#if res}
                 <button class="badge result-badge {STATUS[res.status].cls}" onclick={() => openResult(res)} title={resultTitle(res)}>
@@ -1763,6 +1804,12 @@
   .empty-actions {
     display: flex;
     gap: 8px;
+  }
+  .ready-ok {
+    background: var(--ok-soft);
+  }
+  .ready-todo {
+    background: var(--warn-soft, var(--accent-soft));
   }
   /* "Update TAD dari temuan": the findings checklist and the banners. */
   .findings {

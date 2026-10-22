@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { QAAgentJob, QAFlow, QAGenerateRequest, QARun } from '../../src/lib/qa/types.ts';
 import { QaManager } from './manager.ts';
-import { buildPlanPrompt, evidenceMentions, parsePlan, uncoveredTasks } from './plan.ts';
+import { buildFixPrompt, buildPlanPrompt, buildRepairPrompt, evidenceMentions, parsePlan, uncoveredTasks } from './plan.ts';
 
 const AI = { provider: 'claude' as const, model: '' };
 
@@ -184,6 +184,45 @@ describe('E2E multi-agent pipeline', () => {
       ['Reserve v2', '2. Reserve promo'],
       ['Create v1', '1. Buat promo'],
     ]);
+  });
+
+  it('gives the fix agent the environment databases, so sample values become real data', async () => {
+    const schemas: string[] = [];
+    const m = new QaManager({
+      dir,
+      readSecret: async () => null,
+      writeSecret: async () => true,
+      deleteSecret: async () => true,
+      resolveServicesRoot: async () => services,
+      runAi: (_ai, prompt) => {
+        prompts.push(prompt);
+        const flow = { id: 'f1', name: 'Reserve', description: '', category: 'happy-path', taskTitles: [], variables: {}, enabled: true, steps: [{ id: 's1', name: 'reserve', service: 'core-promo', request: { method: 'POST', path: '/reserve', body: { promo: '{{promoId}}' } }, assertions: [] }], dataQueries: [{ name: 'promoId', db: 'core-promo', sql: "SELECT id FROM promos WHERE status = 'ACTIVE' LIMIT 1" }] };
+        return { done: Promise.resolve({ reply: JSON.stringify({ flows: [flow], changes: [{ flowId: 'f1', summary: 'promoId dari database' }] }) }), cancel: () => {} };
+      },
+      db: {
+        schema: async (c) => (schemas.push(c.database), 'promos(id uuid, status text)'),
+        query: async () => ({ db: 'core-promo', sql: '', columns: [], rows: [], rowCount: 0, durationMs: 0 }),
+        test: async () => 'PostgreSQL',
+        list: async () => [],
+      },
+    } as ConstructorParameters<typeof QaManager>[0]);
+    await m.saveEnvironment({ id: 'dev', name: 'Development', baseUrl: 'http://dev', services: {}, headers: {}, variables: {}, auth: { type: 'none' }, readOnly: false, timeoutMs: 10_000, dbServer: { host: 'db.dev', port: 5432, user: 'ro' }, databases: [{ name: 'core-promo', service: 'core-promo', database: 'db_promo' }] });
+    const [env] = await m.listEnvironments();
+    await m.saveSuite({ projectId: 'proj', projectName: 'Promo', flows: [{ id: 'f1', name: 'Reserve', description: '', category: 'happy-path', taskTitles: [], variables: { promoId: 'P-1' }, enabled: true, steps: [{ id: 's1', name: 'reserve', service: 'core-promo', request: { method: 'POST', path: '/reserve', body: { promo: '{{promoId}}' } }, assertions: [] }] } as QAFlow], updatedAt: '' });
+    await m.fixFlows('proj', { flowIds: ['f1'], instruction: 'isi variabel dari database', ai: AI, environmentId: env.id });
+    await settle(m);
+    expect(schemas).toEqual(['db_promo']);
+    expect(prompts.at(-1)).toContain('## Database (HANYA BACA)');
+    expect(prompts.at(-1)).toContain('promos(id uuid, status text)');
+    expect(prompts.at(-1)).toContain('ambil lewat "dataQueries" dari database service terkait');
+    const suite = await m.getSuite('proj');
+    expect(suite?.flows[0].dataQueries).toEqual([{ name: 'promoId', db: 'core-promo', sql: "SELECT id FROM promos WHERE status = 'ACTIVE' LIMIT 1" }]);
+    // Without an environment the prompt has no database part (as before).
+    expect(buildFixPrompt(suite!.flows, 'x', new Map())).not.toContain('## Database');
+    // The repair agent gets the same: data that is missing in development can come from a query.
+    const repair = buildRepairPrompt(suite!.flows[0], { flowId: 'f1', name: 'Reserve', category: 'happy-path', taskTitles: [], status: 'failed', steps: [] }, undefined, [{ name: 'core-promo', service: 'core-promo', schema: 'promos(id uuid)' }]);
+    expect(repair).toContain('## Database (HANYA BACA)');
+    expect(repair).toContain('bisa diatasi dengan "dataQueries"');
   });
 
   it('refuses a second batch while agents run, and cancels queued agents', async () => {

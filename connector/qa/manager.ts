@@ -812,8 +812,9 @@ export class QaManager {
         const flow = suite.flows.find((f) => f.id === job.flowId)!;
         try {
           const services = [...new Set(flow.steps.map((st) => st.service).filter((x): x is string => Boolean(x)))];
-          const { codebase } = await this.prepareContext({ ...(plan?.request ?? { projectId, projectName: suite.projectName, categories: [] }), ai, tasks: services.map((sv) => ({ title: '', service: sv, spec: '' })), environmentId: undefined }, (t) => (job.progress = t));
-          const reply = await this.runAgent(job, suite.projectName, ai, buildRepairPrompt(flow, result, codebase), REPAIR_SYSTEM_PROMPT, codebase ? [codebase.root] : []);
+          // Same environment as the failed run: its databases let the repair use real test data.
+          const { req: ctx, codebase } = await this.prepareContext({ ...(plan?.request ?? { projectId, projectName: suite.projectName, categories: [] }), ai, tasks: services.map((sv) => ({ title: '', service: sv, spec: '' })), environmentId: run.environment.id }, (t) => (job.progress = t));
+          const reply = await this.runAgent(job, suite.projectName, ai, buildRepairPrompt(flow, result, codebase, ctx.databases), REPAIR_SYSTEM_PROMPT, codebase ? [codebase.root] : []);
           let verdict: ReturnType<typeof parseRepair>;
           try {
             verdict = parseRepair(reply, flow);
@@ -847,9 +848,10 @@ export class QaManager {
    * reading the code (struct types, router) and the flows' latest run. Changed flows replace the
    * old ones as each batch finishes; the old versions are kept for one undo.
    */
-  async fixFlows(projectId: string, opts: { flowIds: string[]; instruction: string; ai?: AiSelection; concurrency?: number }): Promise<QAPipeline> {
+  async fixFlows(projectId: string, opts: { flowIds: string[]; instruction: string; ai?: AiSelection; concurrency?: number; environmentId?: string }): Promise<QAPipeline> {
     projectId = this.projectId(projectId);
-    const instruction = opts.instruction.trim().slice(0, 4_000);
+    // Room for a generated instruction (e.g. the variables to fill from the database).
+    const instruction = opts.instruction.trim().slice(0, 12_000);
     if (!instruction) throw new QaInputError('Tulis instruksi perbaikannya.');
     const suite = await this.getSuite(projectId);
     if (!suite) throw new QaInputError('Belum ada test case.');
@@ -894,8 +896,9 @@ export class QaManager {
         const batch = batches[jobs.indexOf(job)];
         try {
           const services = [...new Set(batch.flatMap((f) => f.steps.map((st) => st.service).filter((x): x is string => Boolean(x))))];
-          const { codebase } = await this.prepareContext({ ...(plan?.request ?? { projectId, projectName: suite.projectName, categories: [] }), ai, tasks: services.map((sv) => ({ title: '', service: sv, spec: '' })), environmentId: undefined }, (t) => (job.progress = t));
-          const reply = await this.runAgent(job, suite.projectName, ai, buildFixPrompt(batch, instruction, results, codebase), FIX_SYSTEM_PROMPT, codebase ? [codebase.root] : []);
+          // The environment's databases of these services: the agent can swap sample values for real data.
+          const { req: ctx, codebase } = await this.prepareContext({ ...(plan?.request ?? { projectId, projectName: suite.projectName, categories: [] }), ai, tasks: services.map((sv) => ({ title: '', service: sv, spec: '' })), environmentId: opts.environmentId }, (t) => (job.progress = t));
+          const reply = await this.runAgent(job, suite.projectName, ai, buildFixPrompt(batch, instruction, results, codebase, ctx.databases), FIX_SYSTEM_PROMPT, codebase ? [codebase.root] : []);
           let fix: ReturnType<typeof parseFix>;
           try {
             fix = parseFix(reply, batch);

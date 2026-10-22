@@ -79,7 +79,7 @@ const SCHEMA = `{
   ]
 }`;
 
-const DB_SCHEMA_EXAMPLE = `Tambahan bila ada database (lihat bagian Database):
+export const DB_SCHEMA_EXAMPLE = `Tambahan bila ada database (lihat bagian Database):
 {
   "dataQueries": [
     { "name": "promoId", "db": "promo", "sql": "SELECT id FROM promos WHERE status = 'ACTIVE' AND end_date > now() ORDER BY created_at DESC LIMIT 1" }
@@ -129,7 +129,7 @@ function codebaseSection(c: NonNullable<QAGenerateRequest['codebase']>): string 
   ].join('\n');
 }
 
-function databaseSection(dbs: NonNullable<QAGenerateRequest['databases']>): string {
+export function databaseSection(dbs: NonNullable<QAGenerateRequest['databases']>): string {
   if (!dbs.length) return '';
   return [
     '',

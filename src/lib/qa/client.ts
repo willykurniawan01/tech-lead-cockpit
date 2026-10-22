@@ -48,7 +48,8 @@ export const qa = {
   writeFromPlan: (projectId: string, concurrency: number, stageIds?: string[]) => post<QAPipeline>('/plan/write', { projectId, concurrency, stageIds }),
   repairRun: (projectId: string, runId: string, concurrency?: number) => post<QAPipeline>('/repair', { projectId, runId, concurrency }),
   /** AI fixes the chosen flows by an instruction (reads the code, keeps one undo). */
-  fixFlows: (projectId: string, flowIds: string[], instruction: string, ai?: AiSelection) => post<QAPipeline>('/fix', { projectId, flowIds, instruction, ai }),
+  /** `environmentId`: its databases' schemas go to the agent, so sample values can become real data. */
+  fixFlows: (projectId: string, flowIds: string[], instruction: string, ai?: AiSelection, environmentId?: string) => post<QAPipeline>('/fix', { projectId, flowIds, instruction, ai, environmentId }),
   undoFix: (projectId: string) => post<{ suite: QASuite }>('/fix/undo', { projectId }).then((r) => r.suite),
   cancelPipeline: (projectId: string) => post<{ pipeline: QAPipeline }>('/pipeline/cancel', { projectId }),
   cancelAgent: (agentId: string) => post<{ agent: QAAgentJob | null }>('/pipeline/cancel', { agentId }),

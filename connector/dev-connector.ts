@@ -1153,10 +1153,10 @@ async function handleQa(route: string, url: URL, req: IncomingMessage, res: Serv
       return send(res, 202, await qa.repairRun(String(body.projectId ?? ''), String(body.runId ?? ''), { concurrency: Number(body.concurrency) || undefined }));
     }
     if (route === 'POST /qa/fix') {
-      const body = await readJson<{ projectId?: string; flowIds?: unknown; instruction?: string; ai?: unknown; concurrency?: number }>(req, 64 * 1024);
+      const body = await readJson<{ projectId?: string; flowIds?: unknown; instruction?: string; ai?: unknown; concurrency?: number; environmentId?: string }>(req, 64 * 1024);
       if (body.ai !== undefined && !isAiSelection(body.ai)) throw new QaInputError('Pilihan AI tidak valid.');
       const flowIds = (Array.isArray(body.flowIds) ? body.flowIds : []).map(String).slice(0, 500);
-      return send(res, 202, await qa.fixFlows(String(body.projectId ?? ''), { flowIds, instruction: String(body.instruction ?? ''), ai: body.ai as AiSelection | undefined, concurrency: Number(body.concurrency) || undefined }));
+      return send(res, 202, await qa.fixFlows(String(body.projectId ?? ''), { flowIds, instruction: String(body.instruction ?? ''), ai: body.ai as AiSelection | undefined, concurrency: Number(body.concurrency) || undefined, environmentId: typeof body.environmentId === 'string' ? body.environmentId : undefined }));
     }
     if (route === 'POST /qa/fix/undo') {
       const body = await readJson<{ projectId?: string }>(req, 16 * 1024);
