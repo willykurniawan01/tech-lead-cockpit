@@ -180,7 +180,10 @@ describe('CoderRuns', () => {
     expect(run.source).toEqual({ kind: 'e2e', projectId: 'p1', flowId: 'f1', flowName: 'Reserve', qaRunId: 'r1' });
     // No Jira key and no "agent-": the branch is fix/<test case>, nothing on Jira moves.
     expect(run.branch).toBe('fix/validasi-edge-case-update-promo-draft');
+    // TAD tasks without a key keep "agent-"; a Bug Tracing fix without a Jira key has none.
     expect(branchName(undefined, 'Tambah filter')).toBe('feature/agent-tambah-filter');
+    const [bug] = await runs.start([{ ...req('svc-b', '[BUGFIX][SVC-B] - Reserve gagal 500'), kind: 'bugfix' }]);
+    expect(bug.branch).toBe('fix/reserve-gagal-500');
     await until(() => ['ready', 'failed'].includes(runs.get(run.id)!.status));
     expect(jiraLog).toEqual([]);
   });

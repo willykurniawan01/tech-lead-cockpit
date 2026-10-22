@@ -84,7 +84,7 @@ Hanya **Claude CLI** dan **Antigravity CLI** (`CODER_PROVIDERS`, `canCode` di [`
 
 ### 3b. Run dari test E2E yang gagal (`source`)
 
-`StartCoderRunRequest.source` / `CoderRun.source` (`{ kind: 'e2e', projectId, flowId, flowName, qaRunId }`, disaring `runSource` di [`connector/coder-runs.ts`](../../../connector/coder-runs.ts)) menandai run bugfix yang dimulai dari tombol **Perbaiki kode** di tab E2E (lihat [QA Automation](../qa-automation/index.md)). Run ini memakai `draftId` `e2e-<projectId>`, tanpa Jira key, dengan branch `fix/<slug>` (`branchName(…, noKey = '')`, tanpa `agent-`). Agent Tasks membukanya di tab E2E proyek, sama seperti `bug-<caseId>` dibuka di Bug Tracing.
+`StartCoderRunRequest.source` / `CoderRun.source` (`{ kind: 'e2e', projectId, flowId, flowName, qaRunId }`, disaring `runSource` di [`connector/coder-runs.ts`](../../../connector/coder-runs.ts)) menandai run bugfix yang dimulai dari tombol **Perbaiki kode** di tab E2E (lihat [QA Automation](../qa-automation/index.md)). Run ini memakai `draftId` `e2e-<projectId>`, tanpa Jira key, dengan branch `fix/<slug>`. Semua run bugfix (juga dari Bug Tracing tanpa Jira key) memakai `fix/<JIRA>-<slug>` atau `fix/<slug>`, tidak pernah `agent-` (`branchName(…, noKey = '')`); hanya task TAD tanpa Jira key yang memakai `feature/agent-<slug>`. Agent Tasks membukanya di tab E2E proyek, sama seperti `bug-<caseId>` dibuka di Bug Tracing.
 
 ### 3c. Base branch yang ada
 

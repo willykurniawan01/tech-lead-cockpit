@@ -242,7 +242,7 @@ export function runSource(raw: unknown): CoderRun['source'] {
   return source.projectId && source.flowId ? source : undefined;
 }
 
-/** `fix/MU-9-…` with a Jira key; without one `agent-` marks a TAD task, `noKey = ''` gives a plain `fix/<slug>`. */
+/** `feature/MU-9-…` with a Jira key; without one `agent-` marks a TAD task, `noKey = ''` (fixes) gives a plain `fix/<slug>`. */
 export function branchName(jiraKey: string | undefined, title: string, prefix: 'feature' | 'fix' = 'feature', noKey = 'agent-'): string {
   const name = title.replace(/^\[[^\]]*\](\[[^\]]*\])*\s*-?\s*/, '');
   const slug = name
@@ -527,8 +527,8 @@ export class CoderRuns {
         repo: req.repo,
         baseBranch,
         targetBranch,
-        // A fix from a failed E2E test has no ticket: its branch is just fix/<test case>.
-        branch: branchName(req.jiraKey, req.taskTitle, req.kind === 'bugfix' ? 'fix' : 'feature', runSource(req.source) ? '' : 'agent-'),
+        // A fix never says "agent": fix/<JIRA>-<slug>, or just fix/<slug> without a ticket.
+        branch: branchName(req.jiraKey, req.taskTitle, req.kind === 'bugfix' ? 'fix' : 'feature', req.kind === 'bugfix' ? '' : 'agent-'),
         ...(req.kind === 'bugfix' ? { kind: 'bugfix' as const } : {}),
         ...(runSource(req.source) ? { source: runSource(req.source) } : {}),
         worktree: join(this.dir, 'work', id),
