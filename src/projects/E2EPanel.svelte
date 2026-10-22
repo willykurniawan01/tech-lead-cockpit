@@ -10,6 +10,8 @@
   import Modal from '../components/Modal.svelte';
   import AgentRunsPanel from '../coder/AgentRunsPanel.svelte';
   import { coder, suggestRepo } from '../lib/coder/client';
+  import { pickBaseBranch } from '../lib/coder/branches';
+  import { appSettings } from '../lib/settings/store.svelte';
   import type { CoderProfileId, CoderRun, CoderRunStatus } from '../lib/coder/types';
   import { buildCodeFixSpec, codeFixTitle, e2eDraftId, failedStep, failingService } from '../lib/qa/code-fix';
   import { latestResults, resultBucket, resultCounts, type LatestResult, type ResultBucket } from '../lib/qa/latest';
@@ -163,6 +165,29 @@
   let fixRepo = $state('');
   let fixProfile = $state<CoderProfileId>('backend');
   let fixBase = $state('');
+  /** The chosen repo's branches; the base is picked from them (a repo may only have main). */
+  let fixBranches = $state<string[]>([]);
+  let fixBranchesFrom = $state<'remote' | 'local' | 'loading' | 'error'>('loading');
+  $effect(() => {
+    const repo = fixRepo;
+    if (!fixOpenModal || !repo) return;
+    untrack(() => void loadFixBranches(repo));
+  });
+  async function loadFixBranches(repo: string) {
+    fixBranchesFrom = 'loading';
+    fixBranches = [];
+    try {
+      const r = await coder.branches(repo);
+      if (repo !== fixRepo) return;
+      fixBranches = r.branches;
+      fixBranchesFrom = r.fromRemote ? 'remote' : 'local';
+      fixBase = pickBaseBranch(r.branches, [appSettings.value.workspace.defaultBaseBranch], r.head) ?? '';
+    } catch (e) {
+      if (repo !== fixRepo) return;
+      fixBranchesFrom = 'error';
+      toasts.show(`Branch ${repo} tidak terbaca: ${(e as Error).message}`, 'err');
+    }
+  }
   let fixNote = $state('');
   let fixStarting = $state(false);
   const fixSpec = $derived(
@@ -206,7 +231,7 @@
           taskTitle: codeFixTitle(flow, fixRepo),
           profile: fixProfile,
           repo: fixRepo,
-          ...(fixBase.trim() ? { baseBranch: fixBase.trim() } : {}),
+          ...(fixBase.trim() ? { baseBranch: fixBase.trim(), targetBranch: fixBase.trim() } : {}),
           spec: fixSpec,
           kind: 'bugfix',
           source: { kind: 'e2e', projectId: project.id, flowId: flow.id, flowName: flow.name, qaRunId: run.id },
@@ -1181,8 +1206,14 @@
           </select>
         </label>
         <label class="field">
-          <span>Base branch <em class="muted">(kosong = default)</em></span>
-          <input class="input mono" bind:value={fixBase} placeholder="staging" />
+          <span>Base branch <em class="muted">{fixBranchesFrom === 'remote' ? '(dari GitLab)' : fixBranchesFrom === 'local' ? '(salinan lokal; GitLab tidak terjangkau)' : ''}</em></span>
+          {#if fixBranches.length}
+            <select class="input mono" bind:value={fixBase}>
+              {#each fixBranches as b (b)}<option value={b}>{b}</option>{/each}
+            </select>
+          {:else}
+            <input class="input mono" bind:value={fixBase} placeholder={fixBranchesFrom === 'loading' ? 'Memuat branch…' : 'staging'} />
+          {/if}
         </label>
       </div>
       <label class="field">
@@ -1200,7 +1231,7 @@
   {/if}
   {#snippet footer()}
     <button class="btn btn-ghost" onclick={() => (fixOpenModal = false)}>Batal</button>
-    <button class="btn btn-primary" onclick={startCodeFix} disabled={!fixRepo || !fixSpec || fixStarting}><Icon name="play" size={13} /> {fixStarting ? 'Memulai…' : 'Jalankan di background'}</button>
+    <button class="btn btn-primary" onclick={startCodeFix} disabled={!fixRepo || !fixSpec || fixStarting || fixBranchesFrom === 'loading' || (fixBranches.length > 0 && !fixBranches.includes(fixBase))}><Icon name="play" size={13} /> {fixStarting ? 'Memulai…' : 'Jalankan di background'}</button>
   {/snippet}
 </Modal>
 

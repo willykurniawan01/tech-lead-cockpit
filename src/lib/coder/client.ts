@@ -22,6 +22,8 @@ async function call<T>(path: string, body?: unknown): Promise<T> {
 export const coder = {
   state: () => call<CoderState>('/state'),
   repos: () => call<string[]>('/repos'),
+  /** Remote branches of a Services repo (GitLab when reachable, else the local copy's), base names first. */
+  branches: (repo: string) => call<{ branches: string[]; head?: string; fromRemote: boolean }>(`/branches?repo=${encodeURIComponent(repo)}`),
   settings: (patch: Partial<CoderSettings> & { profiles?: Partial<Record<CoderProfileId, Partial<CoderProfile>>> }) => call<CoderState>('/settings', patch),
   start: (requests: StartCoderRunRequest[]) => call<CoderRun[]>('/runs', { requests }),
   diff: (id: string) => call<MrFileChange[]>(`/runs/diff?id=${encodeURIComponent(id)}`),

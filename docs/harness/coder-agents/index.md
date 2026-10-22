@@ -84,7 +84,11 @@ Hanya **Claude CLI** dan **Antigravity CLI** (`CODER_PROVIDERS`, `canCode` di [`
 
 ### 3b. Run dari test E2E yang gagal (`source`)
 
-`StartCoderRunRequest.source` / `CoderRun.source` (`{ kind: 'e2e', projectId, flowId, flowName, qaRunId }`, disaring `runSource` di [`connector/coder-runs.ts`](../../../connector/coder-runs.ts)) menandai run bugfix yang dimulai dari tombol **Perbaiki kode** di tab E2E (lihat [QA Automation](../qa-automation/index.md)). Run ini memakai `draftId` `e2e-<projectId>`, tanpa Jira key. Agent Tasks membukanya di tab E2E proyek, sama seperti `bug-<caseId>` dibuka di Bug Tracing.
+`StartCoderRunRequest.source` / `CoderRun.source` (`{ kind: 'e2e', projectId, flowId, flowName, qaRunId }`, disaring `runSource` di [`connector/coder-runs.ts`](../../../connector/coder-runs.ts)) menandai run bugfix yang dimulai dari tombol **Perbaiki kode** di tab E2E (lihat [QA Automation](../qa-automation/index.md)). Run ini memakai `draftId` `e2e-<projectId>`, tanpa Jira key, dengan branch `fix/<slug>` (`branchName(…, noKey = '')`, tanpa `agent-`). Agent Tasks membukanya di tab E2E proyek, sama seperti `bug-<caseId>` dibuka di Bug Tracing.
+
+### 3c. Base branch yang ada
+
+`repoBranches` / `GET /coder/branches?repo=` mendaftar branch remote repo di folder Services: `git ls-remote` ke GitLab bila terjangkau (timeout 10 detik), selain itu remote-tracking branch salinan lokal. `pickBaseBranch` ([`src/lib/coder/branches.ts`](../../../src/lib/coder/branches.ts)) memilih default yang ada. Bila base branch sebuah run tidak ada, error-nya menyebut branch yang tersedia (mis. `Branch yang ada: main, …`).
 
 ### 4. Tidak ada perubahan ≠ mengarang perubahan
 

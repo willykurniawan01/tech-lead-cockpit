@@ -15,6 +15,7 @@ import type {
   CoderSettings,
   StartCoderRunRequest,
 } from '../src/lib/coder/types.ts';
+import { BASE_CANDIDATES } from '../src/lib/coder/branches.ts';
 import type { ProviderOutcome, ProviderRunOptions } from './ai-providers.ts';
 import { countDiffLines } from './gitlab.ts';
 import { DATA_DIR } from './paths.ts';
@@ -206,6 +207,32 @@ export function commandPrefix(command: string): string {
   return command.replace(/\s+(\.\/\.\.\.|-q)$/, '');
 }
 
+/**
+ * Remote branches of a repo in the Services folder: from GitLab when it answers (VPN), else the local
+ * copy's remote-tracking branches. Read-only; feature branches are listed after the usual base names.
+ */
+export async function repoBranches(repoPath: string): Promise<{ branches: string[]; head?: string; fromRemote: boolean }> {
+  const head = await git('git', ['-C', repoPath, 'symbolic-ref', '--short', 'refs/remotes/origin/HEAD'])
+    .then((r) => r.stdout.trim().replace(/^origin\//, '') || undefined)
+    .catch(() => undefined);
+  let names: string[] = [];
+  let fromRemote = false;
+  try {
+    const { stdout } = await git('git', ['-C', repoPath, 'ls-remote', '--heads', 'origin'], { timeout: 10_000, env: { ...process.env, GIT_TERMINAL_PROMPT: '0' } });
+    names = stdout.split('\n').map((l) => l.split('\t')[1]?.replace(/^refs\/heads\//, '') ?? '').filter(Boolean);
+    fromRemote = true;
+  } catch {
+    const { stdout } = await git('git', ['-C', repoPath, 'for-each-ref', '--format=%(refname:short)', 'refs/remotes/origin']).catch(() => ({ stdout: '' }));
+    names = stdout.split('\n').map((l) => l.trim().replace(/^origin\//, '')).filter((b) => b && b !== 'HEAD' && b !== 'origin');
+  }
+  const rank = (b: string) => {
+    const i = BASE_CANDIDATES.indexOf(b);
+    return i >= 0 ? i : b === head ? BASE_CANDIDATES.length : BASE_CANDIDATES.length + 1;
+  };
+  const branches = [...new Set(names)].sort((a, b) => rank(a) - rank(b) || a.localeCompare(b));
+  return { branches, head, fromRemote };
+}
+
 /** A run's origin from the request, as plain short strings (it is only shown and matched on). */
 export function runSource(raw: unknown): CoderRun['source'] {
   const r = raw as Record<string, unknown> | undefined;
@@ -215,7 +242,8 @@ export function runSource(raw: unknown): CoderRun['source'] {
   return source.projectId && source.flowId ? source : undefined;
 }
 
-export function branchName(jiraKey: string | undefined, title: string, prefix: 'feature' | 'fix' = 'feature'): string {
+/** `fix/MU-9-…` with a Jira key; without one `agent-` marks a TAD task, `noKey = ''` gives a plain `fix/<slug>`. */
+export function branchName(jiraKey: string | undefined, title: string, prefix: 'feature' | 'fix' = 'feature', noKey = 'agent-'): string {
   const name = title.replace(/^\[[^\]]*\](\[[^\]]*\])*\s*-?\s*/, '');
   const slug = name
     .toLowerCase()
@@ -223,7 +251,7 @@ export function branchName(jiraKey: string | undefined, title: string, prefix: '
     .replace(/^-|-$/g, '')
     .slice(0, 40)
     .replace(/-$/, '');
-  return `${prefix}/${jiraKey ? `${jiraKey}-` : 'agent-'}${slug || 'task'}`;
+  return `${prefix}/${jiraKey ? `${jiraKey}-` : noKey}${slug || 'task'}`;
 }
 
 /** `git@host:group/repo.git` or `https://host/group/repo.git` → `https://host/group/repo`. */
@@ -445,6 +473,14 @@ export class CoderRuns {
     return this.live.size > 0 || this.runs.some((r) => ['preparing', 'running', 'testing'].includes(r.status));
   }
 
+  /** Branches of a Services repo, to pick a run's base branch from (see repoBranches). */
+  async branches(repo: string) {
+    if (!/^[A-Za-z0-9._-]+$/.test(repo)) throw new CoderError(`Nama repo tidak valid: ${repo}`);
+    const repoPath = join(await this.deps.servicesRoot(), repo);
+    if (!existsSync(join(repoPath, '.git'))) throw new CoderError(`${repo} bukan repo git di folder Services.`);
+    return repoBranches(repoPath);
+  }
+
   get(id: string): CoderRun | undefined {
     return this.runs.find((r) => r.id === id);
   }
@@ -491,7 +527,8 @@ export class CoderRuns {
         repo: req.repo,
         baseBranch,
         targetBranch,
-        branch: branchName(req.jiraKey, req.taskTitle, req.kind === 'bugfix' ? 'fix' : 'feature'),
+        // A fix from a failed E2E test has no ticket: its branch is just fix/<test case>.
+        branch: branchName(req.jiraKey, req.taskTitle, req.kind === 'bugfix' ? 'fix' : 'feature', runSource(req.source) ? '' : 'agent-'),
         ...(req.kind === 'bugfix' ? { kind: 'bugfix' as const } : {}),
         ...(runSource(req.source) ? { source: runSource(req.source) } : {}),
         worktree: join(this.dir, 'work', id),
@@ -710,8 +747,12 @@ export class CoderRuns {
       this.event(run, 'info', `Base: origin/${run.baseBranch} terbaru dari GitLab.`);
     } catch {
       // VPN down: the user's last fetched copy of the base branch is the best we have.
-      await git('git', ['-C', run.worktree, 'fetch', '--quiet', repoPath, `refs/remotes/origin/${run.baseBranch}`]).catch(() => {
-        throw new CoderError(`Branch ${run.baseBranch} tidak bisa diambil dari GitLab maupun salinan lokal ${run.repo}.`);
+      await git('git', ['-C', run.worktree, 'fetch', '--quiet', repoPath, `refs/remotes/origin/${run.baseBranch}`]).catch(async () => {
+        // Name the branches that do exist, so the next attempt picks one of them.
+        const { branches } = await repoBranches(repoPath).catch(() => ({ branches: [] as string[] }));
+        throw new CoderError(
+          `Branch ${run.baseBranch} tidak bisa diambil dari GitLab maupun salinan lokal ${run.repo}.${branches.length ? ` Branch yang ada: ${branches.slice(0, 8).join(', ')}. Mulai ulang dengan base branch salah satunya.` : ''}`,
+        );
       });
       this.event(run, 'info', `GitLab tidak terjangkau; base memakai origin/${run.baseBranch} terakhir di laptop.`);
     }

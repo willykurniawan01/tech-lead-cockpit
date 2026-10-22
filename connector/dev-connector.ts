@@ -774,6 +774,7 @@ async function handleCoder(route: string, url: URL, req: IncomingMessage, res: S
   try {
     if (route === 'GET /coder/state') return send(res, 200, await coder.list());
     if (route === 'GET /coder/repos') return send(res, 200, (await servicesInfo(undefined)).services);
+    if (route === 'GET /coder/branches') return send(res, 200, await coder.branches(url.searchParams.get('repo') ?? ''));
     if (route === 'POST /coder/settings') return send(res, 200, await coder.updateSettings(await readJson(req)));
     if (route === 'POST /coder/runs') {
       const { requests } = await readJson<{ requests?: StartCoderRunRequest[] }>(req);

@@ -38,8 +38,8 @@ export interface CodeFixInput {
   note?: string;
 }
 
-/** Title for the coder run (its branch becomes fix/agent-<slug>; no Jira key). */
-export const codeFixTitle = (flow: QAFlow, repo: string) => `[BUGFIX][${repo.toUpperCase()}] - E2E gagal: ${flow.name}`.slice(0, 300);
+/** Title for the coder run; the [..] tags are left out of its branch, which becomes fix/<test case name>. */
+export const codeFixTitle = (flow: QAFlow, repo: string) => `[BUGFIX][${repo.toUpperCase()}][E2E] - ${flow.name}`.slice(0, 300);
 
 /**
  * The coder run's spec. Headers are left out (they carry the environment's auth); bodies are cut to a

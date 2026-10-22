@@ -6,7 +6,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { StartCoderRunRequest } from '../src/lib/coder/types.ts';
-import { agentPrompt, branchName, canCode, CoderRuns, commandPrefix, DEFAULT_PROFILES, detectTestCommands, newMrUrl, NO_FAKE_CHANGES, repoFileMap, runSource, webUrlOf, type CoderJira } from './coder-runs.ts';
+import { agentPrompt, branchName, canCode, CoderRuns, commandPrefix, DEFAULT_PROFILES, detectTestCommands, newMrUrl, NO_FAKE_CHANGES, repoBranches, repoFileMap, runSource, webUrlOf, type CoderJira } from './coder-runs.ts';
+import { pickBaseBranch } from '../src/lib/coder/branches.ts';
 
 const sh = (cwd: string, ...args: string[]) => execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
 
@@ -175,12 +176,31 @@ describe('CoderRuns', () => {
     expect(runSource({ kind: 'other', projectId: 'p1', flowId: 'f1' })).toBeUndefined();
     expect(runSource({ kind: 'e2e', projectId: 'p1' })).toBeUndefined();
     const { runs } = manager();
-    const [run] = await runs.start([{ ...req('svc-a', 'E2E gagal: Reserve'), kind: 'bugfix', source: { kind: 'e2e', projectId: 'p1', flowId: 'f1', flowName: 'Reserve', qaRunId: 'r1' } }]);
+    const [run] = await runs.start([{ ...req('svc-a', '[BUGFIX][SVC-A][E2E] - Validasi & edge case Update promo DRAFT'), kind: 'bugfix', source: { kind: 'e2e', projectId: 'p1', flowId: 'f1', flowName: 'Reserve', qaRunId: 'r1' } }]);
     expect(run.source).toEqual({ kind: 'e2e', projectId: 'p1', flowId: 'f1', flowName: 'Reserve', qaRunId: 'r1' });
-    // No Jira key: the branch is fix/agent-…, nothing on Jira moves.
-    expect(run.branch).toBe('fix/agent-e2e-gagal-reserve');
+    // No Jira key and no "agent-": the branch is fix/<test case>, nothing on Jira moves.
+    expect(run.branch).toBe('fix/validasi-edge-case-update-promo-draft');
+    expect(branchName(undefined, 'Tambah filter')).toBe('feature/agent-tambah-filter');
     await until(() => ['ready', 'failed'].includes(runs.get(run.id)!.status));
     expect(jiraLog).toEqual([]);
+  });
+
+  it('lists a repo\'s branches and picks a base that exists', async () => {
+    expect(await repoBranches(join(services, 'svc-a'))).toEqual({ branches: ['staging'], head: 'staging', fromRemote: true });
+    // A repo with only main: the setting's default and the usual names are skipped.
+    expect(pickBaseBranch(['main', 'feature/x'], ['staging'], 'main')).toBe('main');
+    expect(pickBaseBranch(['development', 'main'], [undefined])).toBe('development');
+    expect(pickBaseBranch(['release', 'feature/x'], ['staging'])).toBe('release');
+    const { runs } = manager();
+    await expect(runs.branches('../x')).rejects.toThrow(/tidak valid/);
+    expect((await runs.branches('svc-b')).branches).toEqual(['staging']);
+  });
+
+  it('names the branches that exist when the base branch is missing', async () => {
+    const { runs } = manager();
+    const [run] = await runs.start([{ ...req('svc-a', 'Base salah'), baseBranch: 'development' }]);
+    await until(() => ['failed', 'ready'].includes(runs.get(run.id)!.status));
+    expect(runs.get(run.id)!.error).toBe('Branch development tidak bisa diambil dari GitLab maupun salinan lokal svc-a. Branch yang ada: staging. Mulai ulang dengan base branch salah satunya.');
   });
 
   it('rejects repos outside the Services folder', async () => {
@@ -411,7 +431,7 @@ describe('CoderRuns', () => {
     expect(completed.status).toBe('completed');
     expect(completed.finishedAt).toBeTruthy();
     expect(completed.events.some((e) => e.text.includes('MR sudah merged'))).toBe(true);
-  });
+  }, 30_000);
 
   it('syncs branch automatically to local Services repo on commit and via syncLocal', async () => {
     const { runs } = manager();

@@ -41,7 +41,7 @@ describe('code fix from a failed E2E test', () => {
     expect(failedStep(result)?.stepId).toBe('s2');
     expect(failingService(flow, result)).toBe('core-promo-ultimate');
     expect(e2eDraftId('p1')).toBe('e2e-p1');
-    expect(codeFixTitle(flow, 'core-promo-ultimate')).toBe('[BUGFIX][CORE-PROMO-ULTIMATE] - E2E gagal: Reserve promo kuota habis');
+    expect(codeFixTitle(flow, 'core-promo-ultimate')).toBe('[BUGFIX][CORE-PROMO-ULTIMATE][E2E] - Reserve promo kuota habis');
   });
 
   it('writes a spec from the failure, the test and the TAD, without headers', () => {
