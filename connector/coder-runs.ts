@@ -15,7 +15,7 @@ import type {
   CoderSettings,
   StartCoderRunRequest,
 } from '../src/lib/coder/types.ts';
-import { BASE_CANDIDATES } from '../src/lib/coder/branches.ts';
+import { BASE_CANDIDATES, branchName, branchNameError } from '../src/lib/coder/branches.ts';
 import type { ProviderOutcome, ProviderRunOptions } from './ai-providers.ts';
 import { countDiffLines } from './gitlab.ts';
 import { DATA_DIR } from './paths.ts';
@@ -242,17 +242,7 @@ export function runSource(raw: unknown): CoderRun['source'] {
   return source.projectId && source.flowId ? source : undefined;
 }
 
-/** `feature/MU-9-…` with a Jira key; without one `agent-` marks a TAD task, `noKey = ''` (fixes) gives a plain `fix/<slug>`. */
-export function branchName(jiraKey: string | undefined, title: string, prefix: 'feature' | 'fix' = 'feature', noKey = 'agent-'): string {
-  const name = title.replace(/^\[[^\]]*\](\[[^\]]*\])*\s*-?\s*/, '');
-  const slug = name
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-|-$/g, '')
-    .slice(0, 40)
-    .replace(/-$/, '');
-  return `${prefix}/${jiraKey ? `${jiraKey}-` : noKey}${slug || 'task'}`;
-}
+export { branchName };
 
 /** `git@host:group/repo.git` or `https://host/group/repo.git` → `https://host/group/repo`. */
 export function webUrlOf(origin: string): string | undefined {
@@ -513,6 +503,8 @@ export class CoderRuns {
       if (!existsSync(join(repoPath, '.git'))) throw new CoderError(`${req.repo} bukan repo git di folder Services.`);
       if (!req.spec?.trim()) throw new CoderError(`Spesifikasi task "${req.taskTitle}" kosong.`);
       if (!canCode(this.profiles[req.profile].ai)) throw new CoderError(NOT_A_CODER(this.profiles[req.profile].ai.provider));
+      const customBranch = req.branch?.trim();
+      if (customBranch && branchNameError(customBranch)) throw new CoderError(branchNameError(customBranch)!);
       const id = randomUUID();
       const baseBranch = req.baseBranch?.trim() || defaultBaseBranch();
       const targetBranch = req.targetBranch?.trim() || baseBranch;
@@ -528,7 +520,7 @@ export class CoderRuns {
         baseBranch,
         targetBranch,
         // A fix never says "agent": fix/<JIRA>-<slug>, or just fix/<slug> without a ticket.
-        branch: branchName(req.jiraKey, req.taskTitle, req.kind === 'bugfix' ? 'fix' : 'feature', req.kind === 'bugfix' ? '' : 'agent-'),
+        branch: customBranch || branchName(req.jiraKey, req.taskTitle, req.kind === 'bugfix' ? 'fix' : 'feature', req.kind === 'bugfix' ? '' : 'agent-'),
         ...(req.kind === 'bugfix' ? { kind: 'bugfix' as const } : {}),
         ...(runSource(req.source) ? { source: runSource(req.source) } : {}),
         worktree: join(this.dir, 'work', id),

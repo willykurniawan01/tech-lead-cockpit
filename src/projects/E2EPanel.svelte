@@ -10,7 +10,7 @@
   import Modal from '../components/Modal.svelte';
   import AgentRunsPanel from '../coder/AgentRunsPanel.svelte';
   import { coder, suggestRepo } from '../lib/coder/client';
-  import { pickBaseBranch } from '../lib/coder/branches';
+  import { branchName, branchNameError, pickBaseBranch } from '../lib/coder/branches';
   import { appSettings } from '../lib/settings/store.svelte';
   import type { CoderProfileId, CoderRun, CoderRunStatus } from '../lib/coder/types';
   import { buildCodeFixSpec, codeFixTitle, e2eDraftId, failedStep, failingService } from '../lib/qa/code-fix';
@@ -174,6 +174,10 @@
   /** The chosen repo's branches; the base is picked from them (a repo may only have main). */
   let fixBranches = $state<string[]>([]);
   let fixBranchesFrom = $state<'remote' | 'local' | 'loading' | 'error'>('loading');
+  /** Branch for the fix, editable; suggested from the test case name (same rule as the connector). */
+  let fixBranch = $state('');
+  const fixBranchError = $derived(branchNameError(fixBranch));
+  const fixBranchExists = $derived(Boolean(fixBranch.trim()) && fixBranches.includes(fixBranch.trim()));
   $effect(() => {
     const repo = fixRepo;
     if (!fixOpenModal || !repo) return;
@@ -219,6 +223,7 @@
     if (!flow || !run || !result) return toasts.show('Hasil run yang gagal untuk test case ini tidak ditemukan.', 'err');
     fixTarget = { flow, result, run };
     fixNote = '';
+    fixBranch = branchName(undefined, codeFixTitle(flow, ''), 'fix', '');
     fixOpenModal = true;
     fixRepos = await coder.repos().catch(() => []);
     fixRepo = suggestRepo(fixRepos, failingService(flow, result)) || fixRepo;
@@ -238,6 +243,7 @@
           profile: fixProfile,
           repo: fixRepo,
           ...(fixBase.trim() ? { baseBranch: fixBase.trim(), targetBranch: fixBase.trim() } : {}),
+          branch: fixBranch.trim(),
           spec: fixSpec,
           kind: 'bugfix',
           source: { kind: 'e2e', projectId: project.id, flowId: flow.id, flowName: flow.name, qaRunId: run.id },
@@ -1369,6 +1375,15 @@
         </label>
       </div>
       <label class="field">
+        <span>Nama branch <em class="muted">(bisa diubah; dibuat dari base branch di atas)</em></span>
+        <input class="input mono" bind:value={fixBranch} maxlength="120" spellcheck="false" placeholder="fix/nama-perbaikan" />
+        {#if fixBranchError}
+          <span class="err small">{fixBranchError}</span>
+        {:else if fixBranchExists}
+          <span class="warn-text small">Branch ini sudah ada di repo. Pakai nama lain, atau pastikan memang ingin melanjutkan branch itu (push bisa ditolak bila riwayatnya berbeda).</span>
+        {/if}
+      </label>
+      <label class="field">
         <span>Catatan untuk agent <em class="muted">(opsional)</em></span>
         <textarea class="input" rows="3" bind:value={fixNote} placeholder="mis. validasi tanggal seharusnya pakai zona Asia/Jakarta"></textarea>
       </label>
@@ -1383,7 +1398,7 @@
   {/if}
   {#snippet footer()}
     <button class="btn btn-ghost" onclick={() => (fixOpenModal = false)}>Batal</button>
-    <button class="btn btn-primary" onclick={startCodeFix} disabled={!fixRepo || !fixSpec || fixStarting || fixBranchesFrom === 'loading' || (fixBranches.length > 0 && !fixBranches.includes(fixBase))}><Icon name="play" size={13} /> {fixStarting ? 'Memulai…' : 'Jalankan di background'}</button>
+    <button class="btn btn-primary" onclick={startCodeFix} disabled={!fixRepo || !fixSpec || fixStarting || Boolean(fixBranchError) || fixBranchesFrom === 'loading' || (fixBranches.length > 0 && !fixBranches.includes(fixBase))}><Icon name="play" size={13} /> {fixStarting ? 'Memulai…' : 'Jalankan di background'}</button>
   {/snippet}
 </Modal>
 
@@ -1634,6 +1649,9 @@
     display: grid;
     grid-template-columns: 2fr 1fr 1fr;
     gap: 10px;
+  }
+  .warn-text {
+    color: var(--warn, #b45309);
   }
   .spec-preview {
     max-height: 320px;

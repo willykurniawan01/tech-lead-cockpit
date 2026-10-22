@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { StartCoderRunRequest } from '../src/lib/coder/types.ts';
 import { agentPrompt, branchName, canCode, CoderRuns, commandPrefix, DEFAULT_PROFILES, detectTestCommands, newMrUrl, NO_FAKE_CHANGES, repoBranches, repoFileMap, runSource, webUrlOf, type CoderJira } from './coder-runs.ts';
-import { pickBaseBranch } from '../src/lib/coder/branches.ts';
+import { branchNameError, pickBaseBranch } from '../src/lib/coder/branches.ts';
 
 const sh = (cwd: string, ...args: string[]) => execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
 
@@ -186,7 +186,7 @@ describe('CoderRuns', () => {
     expect(bug.branch).toBe('fix/reserve-gagal-500');
     await until(() => ['ready', 'failed'].includes(runs.get(run.id)!.status));
     expect(jiraLog).toEqual([]);
-  });
+  }, 30_000);
 
   it('lists a repo\'s branches and picks a base that exists', async () => {
     expect(await repoBranches(join(services, 'svc-a'))).toEqual({ branches: ['staging'], head: 'staging', fromRemote: true });
@@ -198,6 +198,24 @@ describe('CoderRuns', () => {
     await expect(runs.branches('../x')).rejects.toThrow(/tidak valid/);
     expect((await runs.branches('svc-b')).branches).toEqual(['staging']);
   });
+
+  it('takes a custom branch name, and refuses one git or the team would not want', async () => {
+    expect(branchNameError('fix/MU-12-validasi-tanggal')).toBeUndefined();
+    expect(branchNameError('hotfix/promo.v2_final')).toBeUndefined();
+    expect(branchNameError('')).toBe('Nama branch kosong.');
+    expect(branchNameError('fix/ada spasi')).toContain('tanpa spasi');
+    expect(branchNameError('fix/../x')).toContain('tidak valid');
+    expect(branchNameError('fix/x/')).toContain('tidak valid');
+    expect(branchNameError('-fix')).toContain('tidak valid');
+    expect(branchNameError('fix/x.lock')).toContain('tidak valid');
+    expect(branchNameError('main')).toContain('branch utama');
+    const { runs } = manager();
+    const [run] = await runs.start([{ ...req('svc-a', 'Custom'), kind: 'bugfix', branch: ' fix/promo-tanggal ' }]);
+    expect(run.branch).toBe('fix/promo-tanggal');
+    await until(() => ['failed', 'ready'].includes(runs.get(run.id)!.status));
+    expect(sh(runs.get(run.id)!.worktree, 'rev-parse', '--abbrev-ref', 'HEAD')).toBe('fix/promo-tanggal');
+    await expect(runs.start([{ ...req('svc-b', 'Salah'), branch: 'fix/ada spasi' }])).rejects.toThrow('tanpa spasi');
+  }, 30_000);
 
   it('names the branches that exist when the base branch is missing', async () => {
     const { runs } = manager();

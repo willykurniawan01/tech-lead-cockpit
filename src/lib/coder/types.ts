@@ -33,6 +33,8 @@ export interface StartCoderRunRequest {
   kind?: 'task' | 'bugfix';
   /** Where the run was started from when not a TAD task, e.g. a failed E2E test case. */
   source?: CoderRunSource;
+  /** Branch name chosen by the user (validated by branchNameError); default from branchName. */
+  branch?: string;
 }
 
 /** A bug fix started from a failed E2E test case ("Perbaiki kode"), no ticket involved. */
