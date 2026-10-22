@@ -60,6 +60,8 @@ sequenceDiagram
 | [`connector/qa/manager.ts`](file:///Users/ridwan/mine/tech-lead-cockpit/connector/qa/manager.ts) | QA Suite Manager | Logika suite, run, pipeline agent, dan environment (rahasia ke Keychain). Data disimpan lewat `QaStore` (`deps.store`, default file), `updated_by` dari `deps.actor`. Agent latar belakang menyimpan lewat `updateSuite` (baca ulang dan coba lagi maks. 3x bila konflik). |
 | [`connector/qa/store.ts`](../../../connector/qa/store.ts) | Kontrak Store + File | Interface `QaStore`, `QaConflictError`, `KEEP_RUNS` (50), dan `FileQaStore` (layout file lama + kolom `version`, tulis atomik). |
 | [`connector/qa/pg-store.ts`](../../../connector/qa/pg-store.ts) | Store PostgreSQL | `PgQaStore` (pool `pg`, maks. 4 koneksi), `MIGRATIONS` berversi di tabel `schema_version` (di bawah `pg_advisory_xact_lock`), `probe()` untuk Tes koneksi, pesan error koneksi yang bisa ditindaklanjuti (`QaStoreError`). |
+| [`connector/qa/confluence-store.ts`](../../../connector/qa/confluence-store.ts) | Store Confluence | `ConfluenceQaStore`: halaman per proyek di bawah halaman induk, data di lampiran JSON, versi halaman sebagai kunci (lihat bagian Penyimpanan E2E). Seam `ConfluenceApi` (`ConfluenceClient` / fake di test). |
+| [`src/lib/qa/merge.ts`](../../../src/lib/qa/merge.ts) | Gabung Otomatis | `mergeSuites(base, mine, theirs)`: gabung 3 arah per test case (id flow) dan per field suite; konflik hanya bila hal yang sama berubah di kedua sisi. |
 | [`connector/qa/store-config.ts`](../../../connector/qa/store-config.ts) | Pemilih Store | `QaStoreSwitch` mengikuti Pengaturan: file, atau satu pool per koneksi/password. DB pusat yang dipilih tapi tidak lengkap memberi error di setiap panggilan, **tidak** jatuh diam-diam ke file. |
 | [`connector/qa/store-migrate.ts`](../../../connector/qa/store-migrate.ts) | Pindah ke DB Pusat | `moveToCentral`: backup folder `qa` ke `~/.tech-lead-cockpit/qa-backups/<ts>-before-central`, lalu salin proyek, suite, rencana, environment, dan run. Tidak menimpa, file lokal tetap ada, aman diulang. |
 | [`connector/qa/generator.ts`](file:///Users/ridwan/mine/tech-lead-cockpit/connector/qa/generator.ts) | AI Skenario Generator | Menganalisis dokumen arsitektur teknis untuk menghasilkan skenario pengujian realistis dengan validasi boundary & edge cases. |
@@ -217,7 +219,29 @@ Data E2E (proyek, suite beserta grup, rencana journey, riwayat run, dan environm
 | Mode | Lokasi | Untuk |
 |---|---|---|
 | `file` (default) | `~/.tech-lead-cockpit/qa/`: `suites/<projectId>.json`, `plans/<projectId>.json`, `runs/<projectId>/<runId>.json`, `environments.json`, `projects.json` | Satu orang di satu laptop |
-| `postgres` | Database bersama (mis. `tlc_qa` di server PostgreSQL dev) | Tech Lead Cockpit dan QA Cockpit memakai data yang sama |
+| `confluence` | Halaman di bawah satu halaman induk (`confluenceSpace`, `confluenceParentId`), memakai koneksi Confluence app | Tech Lead Cockpit dan QA Cockpit memakai data yang sama (pilihan utama) |
+| `postgres` | Database bersama (mis. `tlc_qa` di server PostgreSQL dev) | Alternatif bila ada server PostgreSQL bersama |
+
+### Mode Confluence
+```
+<halaman induk>
+├── API Testing · Environment                 environments.json
+└── <proyek> · API Testing [<projectId>]      project.json, suite.json   (isi: ringkasan untuk dibaca)
+    ├── <proyek> · Rencana [<projectId>]      plan.json
+    └── <proyek> · Run [<projectId>]          run-<id>.json (50 terbaru)
+```
+- **Lampiran JSON adalah data; isi halaman hanya ringkasan** (grup, test case, kategori, jumlah step) dengan catatan "dikelola Cockpit, jangan diedit manual".
+- **Kunci = versi halaman.** Simpan: baca versi halaman → bila beda dari versi yang dimuat, `QaConflictError` → update halaman ke versi+1 (Confluence menolak 409 bila ada yang mendahului) → baru lampiran ditulis (`putAttachment`, gagal = error, tidak ditelan). Rencana dan environment punya halaman sendiri, jadi tidak saling mengunci dengan test case. Run tanpa kunci (tiap run file baru); yang lebih lama dari 50 dihapus.
+- **Environment:** satu halaman untuk semua; environment baru tidak pernah bentrok, edit environment dengan versi lama ditolak.
+- **Akun bersama:** riwayat Confluence mencatat akun app; pengubah asli dicatat app (`updatedBy` di JSON, isi halaman, dan pesan versi).
+- **Tes koneksi** membaca halaman induk dan memeriksa izin `update` (`canUpdate`, `?expand=operations`); halaman yang terbaca tapi tidak boleh diubah ditolak dengan pesan jelas.
+- Proyek baru dibuat otomatis saat pertama disimpan; `upsertProject` (tab E2E) membuat halaman proyek dan `project.json` (nama + TAD) yang dibaca QA Cockpit saat Import.
+
+### Gabung otomatis per test case
+`QaManager.saveSuite` mengingat suite yang terakhir dikirim per versi (`served`). Bila simpan kalah balapan (`QaConflictError`), suite terbaru dibaca dan `mergeSuites(base, mine, theirs)` menggabungkan:
+- test case yang diubah di satu sisi saja, tambahan, dan penghapusan;
+- urutan (milik saya bila hanya saya yang mengubah urutan), daftar grup (gabungan), field suite lain.
+Hanya test case yang sama (atau field suite yang sama, mis. catatan) yang berubah di kedua sisi menjadi konflik: `QaConflictError` dengan daftar yang bentrok ("Test case "X" sudah diubah oleh Y pada Z"). Berlaku untuk semua mode (file, Confluence, PostgreSQL).
 
 - **Tabel** (dibuat dan di-upgrade oleh app, `MIGRATIONS` di `pg-store.ts`, tercatat di `schema_version`): `qa_projects` (id, name, `tads` jsonb: judul, draftId, Confluence page id/url, Jira keys), `qa_suites`/`qa_plans`/`qa_environments` (`data` jsonb, `version`, `updated_at`, `updated_by`), `qa_runs` (id, project_id, started_at, status, environment_id, summary, data). Migrasi baru = tambah entri ke `MIGRATIONS`, jangan ubah yang sudah ada. App yang lebih lama dari skema menolak jalan ("Perbarui app dulu").
 - **Tanpa rahasia.** Token, password DB, dan variabel rahasia environment tetap di Keychain tiap user dengan kunci `env:<id>` yang sama, jadi environment bersama dipakai dengan kredensial masing-masing. `storableEnvironment` membuang field status Keychain sebelum disimpan.
@@ -232,8 +256,8 @@ Data E2E (proyek, suite beserta grup, rencana journey, riwayat run, dan environm
 | Endpoint | Fungsi |
 |---|---|
 | `GET /qa/store` | Mode aktif dan target (`host:port/db`) |
-| `POST /qa/store/test` | Login dengan isian form (belum disimpan) atau yang tersimpan: versi server dan versi skema, tanpa membuat tabel |
-| `POST /qa/store/migrate` | Backup lalu salin data lokal ke DB pusat (audit) |
+| `POST /qa/store/test` | Tes isian form (belum disimpan) atau yang tersimpan: PostgreSQL (versi server dan skema, tanpa membuat tabel) atau Confluence (halaman induk dan izin edit). Balasan `{ summary }` |
+| `POST /qa/store/migrate` | Backup lalu salin data lokal ke penyimpanan bersama (Confluence atau DB pusat), audit |
 | `GET /qa/projects`, `POST /qa/projects` | Daftar proyek; upsert nama dan TAD |
 
 ---

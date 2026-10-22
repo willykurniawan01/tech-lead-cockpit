@@ -8,6 +8,7 @@ import { executeSetup, listDatabases, QaDbError, queryReadOnly, schemaSummary, t
 import { matchDatabases } from '../../src/lib/qa/db-match.ts';
 import { buildQaPrompt, dedupeStepIds, parseQaReply, QA_SYSTEM_PROMPT } from './generator.ts';
 import { arrangeFlows, groupOrder } from '../../src/lib/qa/groups.ts';
+import { mergeSuites } from '../../src/lib/qa/merge.ts';
 import { buildFixPrompt, buildPlanPrompt, buildRepairPrompt, checkFlowsAgainstPlan, evidenceMentions, FIX_SYSTEM_PROMPT, parseFix, parsePlan, parseRepair, PLAN_SYSTEM_PROMPT, REPAIR_SYSTEM_PROMPT } from './plan.ts';
 import { verifyEvidence } from '../trace/verify.ts';
 import { declaredTypes, runFlow, summarize } from './runner.ts';
@@ -177,6 +178,8 @@ export class QaManager {
   /** Cancel functions of running pipeline agents, and agents asked to stop. */
   private readonly agentCancels = new Map<string, () => void>();
   private readonly agentStopped = new Set<string>();
+  /** Suites as last handed out, per version: the base for merging a save that lost a race. */
+  private readonly served = new Map<string, QASuite>();
 
   constructor(private readonly deps: QaDeps) {
     this.dir = deps.dir ?? join(DATA_DIR, 'qa');
@@ -406,7 +409,19 @@ export class QaManager {
 
   private suiteFile = (projectId: string) => this.fileStore.suiteFile(this.projectId(projectId));
 
+  private remember(suite: QASuite | null): QASuite | null {
+    if (!suite) return suite;
+    this.served.set(`${suite.projectId}@${suite.version ?? 0}`, structuredClone(suite));
+    // A handful per project is plenty: a page holds its version for minutes, not hours.
+    while (this.served.size > 50) this.served.delete(this.served.keys().next().value!);
+    return suite;
+  }
+
   async getSuite(projectId: string): Promise<QASuite | null> {
+    return this.remember(await this.loadSuite(projectId));
+  }
+
+  private async loadSuite(projectId: string): Promise<QASuite | null> {
     const suite = await this.store.getSuite(this.projectId(projectId));
     if (!suite) return null;
     // Steps keyed by id in the UI and in run results must be unique; heal older suites once.
@@ -453,10 +468,31 @@ export class QaManager {
     return merged;
   }
 
-  /** Saves over the version `suite` was loaded with; QaConflictError when someone saved in between. */
+  /**
+   * Saves over the version `suite` was loaded with. When someone saved in between, the changes are
+   * merged per test case (mergeSuites) and saved again; QaConflictError only when the same test
+   * case changed on both sides, or when the version it was loaded with is no longer known.
+   */
   async saveSuite(suite: QASuite): Promise<QASuite> {
-    const saved = { ...suite, projectId: this.projectId(suite.projectId), updatedAt: new Date().toISOString() };
-    return this.store.saveSuite(saved, await this.actor());
+    const mine = { ...suite, projectId: this.projectId(suite.projectId), updatedAt: new Date().toISOString() };
+    const by = await this.actor();
+    try {
+      return this.remember(await this.store.saveSuite(mine, by))!;
+    } catch (e) {
+      const base = e instanceof QaConflictError ? this.served.get(`${mine.projectId}@${mine.version ?? 0}`) : undefined;
+      if (!base) throw e;
+      for (let attempt = 1; ; attempt++) {
+        const theirs = await this.store.getSuite(mine.projectId);
+        if (!theirs) throw e;
+        const merged = mergeSuites(base, mine, theirs);
+        if ('conflicts' in merged) throw new QaConflictError('suite', theirs.updatedBy, theirs.updatedAt, merged.conflicts);
+        try {
+          return this.remember(await this.store.saveSuite({ ...merged.suite, version: theirs.version }, by))!;
+        } catch (again) {
+          if (!(again instanceof QaConflictError) || attempt >= SAVE_ATTEMPTS) throw again;
+        }
+      }
+    }
   }
 
   /**

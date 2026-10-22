@@ -30,10 +30,11 @@ export interface AppSettings {
   /** Who you are in shared data (E2E test cases in the shared database): name and email. */
   identity: { name: string; email: string };
   /**
-   * Where E2E test cases, runs and environments are kept: 'file' (this laptop) or 'postgres' (the
-   * shared database used with QA). The password is in the Keychain (secret 'qastore').
+   * Where E2E test cases, runs and environments are kept: 'file' (this laptop), 'confluence' (pages
+   * under one parent page, shared with QA Cockpit, using the Confluence connection) or 'postgres'
+   * (a shared database; password in the Keychain, secret 'qastore').
    */
-  qaStore: { mode: 'file' | 'postgres'; host: string; port: number; database: string; user: string; ssl: boolean };
+  qaStore: { mode: 'file' | 'postgres' | 'confluence'; host: string; port: number; database: string; user: string; ssl: boolean; confluenceSpace: string; confluenceParentId: string };
   setup: {
     /** Set when the wizard was finished; the wizard opens on its own until then. */
     completedAt?: string;
@@ -71,6 +72,6 @@ export const DEFAULT_SETTINGS: AppSettings = {
   },
   teams: { tenantId: '', clientId: '' },
   identity: { name: '', email: '' },
-  qaStore: { mode: 'file', host: '', port: 5432, database: 'tlc_qa', user: '', ssl: false },
+  qaStore: { mode: 'file', host: '', port: 5432, database: 'tlc_qa', user: '', ssl: false, confluenceSpace: '', confluenceParentId: '' },
   setup: { skipped: [] },
 };

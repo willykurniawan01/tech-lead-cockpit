@@ -337,12 +337,12 @@ export interface QAProject {
   updatedBy?: string;
 }
 
-/** Where E2E data is kept: files in the data folder, or the shared PostgreSQL database. */
+/** Where E2E data is kept: files in the data folder, Confluence pages, or a shared PostgreSQL database. */
 export interface QAStoreStatus {
-  mode: 'file' | 'postgres';
-  /** host:port/database (postgres only). */
+  mode: 'file' | 'postgres' | 'confluence';
+  /** host:port/database, or "space / page <id>". */
   target?: string;
-  /** The connection failed (postgres only). */
+  /** Why the chosen store can't be used yet. */
   error?: string;
 }
 

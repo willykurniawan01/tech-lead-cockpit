@@ -13,15 +13,19 @@ import type { QAEnvironment, QAPlan, QAProject, QARun, QASuite } from '../../src
 /** Finished runs kept per project (the oldest go first). */
 export const KEEP_RUNS = 50;
 
-export type QaStoreKind = 'file' | 'postgres';
+export type QaStoreKind = 'file' | 'postgres' | 'confluence';
 
 export class QaConflictError extends Error {
   constructor(
     readonly what: 'suite' | 'plan' | 'environment',
     readonly updatedBy?: string,
     readonly updatedAt?: string,
+    /** What changed on both sides ('test case "X"', 'catatan suite'): why an automatic merge was impossible. */
+    readonly flows?: string[],
   ) {
-    const subject = what === 'suite' ? 'Test case proyek ini' : what === 'plan' ? 'Rencana journey ini' : 'Environment ini';
+    const list = flows?.length ? `${flows.slice(0, 5).join(', ')}${flows.length > 5 ? ` dan ${flows.length - 5} lainnya` : ''}` : '';
+    const names = list && list[0].toUpperCase() + list.slice(1);
+    const subject = names || (what === 'suite' ? 'Test case proyek ini' : what === 'plan' ? 'Rencana journey ini' : 'Environment ini');
     const who = updatedBy ? ` oleh ${updatedBy}` : '';
     const when = updatedAt ? ` pada ${formatTime(updatedAt)}` : '';
     super(`${subject} sudah diubah${who}${when}. Perubahan Anda belum disimpan; muat ulang untuk melihat versi terbaru.`);

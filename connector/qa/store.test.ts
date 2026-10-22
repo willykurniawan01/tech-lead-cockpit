@@ -137,14 +137,14 @@ describe('QaStoreSwitch', () => {
   it('uses files by default, one pool per connection, and never falls back silently', async () => {
     let pools = 0;
     const sw = new QaStoreSwitch({ readPassword: async () => 'pw', createPool: () => (pools++, memoryDb().pool()) });
-    await sw.apply({ mode: 'file', host: '', port: 5432, database: 'tlc_qa', user: '', ssl: false });
+    await sw.apply({ mode: 'file', host: '', port: 5432, database: 'tlc_qa', user: '', ssl: false, confluenceSpace: '', confluenceParentId: '' });
     expect(sw.current()).toBeUndefined();
     expect(sw.status()).toEqual({ mode: 'file' });
 
-    await sw.apply({ mode: 'postgres', host: '', port: 5432, database: 'tlc_qa', user: '', ssl: false });
+    await sw.apply({ mode: 'postgres', host: '', port: 5432, database: 'tlc_qa', user: '', ssl: false, confluenceSpace: '', confluenceParentId: '' });
     await expect(sw.current()!.getSuite('p1')).rejects.toThrow(/host\/user belum diisi/);
 
-    const cfg = { mode: 'postgres' as const, host: 'db.test', port: 5432, database: 'tlc_qa', user: 'tlc', ssl: false };
+    const cfg = { mode: 'postgres' as const, host: 'db.test', port: 5432, database: 'tlc_qa', user: 'tlc', ssl: false, confluenceSpace: '', confluenceParentId: '' };
     await sw.apply(cfg);
     await sw.apply(cfg);
     expect(pools).toBe(1);

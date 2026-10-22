@@ -86,6 +86,9 @@ Token dibuat di Figma → Settings → Security → Personal access tokens denga
 | [`connector/ninerouter.ts`](file:///Users/ridwan/mine/tech-lead-cockpit/connector/ninerouter.ts) | 9Router Driver | Integrasi ke model gateway 9Router dengan streaming protokol seragam. |
 | [`connector/keychain.ts`](file:///Users/ridwan/mine/tech-lead-cockpit/connector/keychain.ts) | macOS Keychain Adapter | Fungsi `readKeychain()`, `writeKeychain()`, dan `deleteKeychain()` yang membungkus CLI `/usr/bin/security`. |
 
+### Penyimpanan E2E di Confluence
+`ConfluenceClient` punya metode tambahan untuk store Confluence (`connector/qa/confluence-store.ts`): `childPages`, `attachments`, `readAttachment` (unduh lewat `_links.download`, Cloud mengalihkan ke media host), `putAttachment` (buat/ganti lampiran; gagal = error, berbeda dengan `upsertAttachment` untuk draft TAD), `deleteAttachment`, `canUpdate` (`?expand=operations`). Semuanya API v1 yang sama di Cloud dan Data Center. Store dibangun ulang saat URL/token Confluence berubah (`POST /settings/secret` untuk `confluence`/`jira`, `POST /confluence/save-token`).
+
 ### DB Pusat E2E (PostgreSQL bersama)
 | File Path | Komponen | Deskripsi & Tanggung Jawab |
 |---|---|---|

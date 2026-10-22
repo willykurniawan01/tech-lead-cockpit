@@ -36,8 +36,8 @@ const q = (params: Record<string, string>) => `?${new URLSearchParams(params)}`;
 export const qa = {
   /** Where E2E data is kept (files or the shared database). */
   store: () => call<QAStoreStatus>('/store'),
-  /** Logs in to the shared database with these (maybe unsaved) settings; '' password = the stored one. */
-  testStore: (settings: AppSettings['qaStore'], password?: string) => post<{ server: string; schemaVersion: number }>('/store/test', { settings, password }),
+  /** Tests the (maybe unsaved) storage settings: the database login, or the Confluence parent page and edit access. */
+  testStore: (settings: AppSettings['qaStore'], password?: string) => post<{ summary: string }>('/store/test', { settings, password }),
   /** Backs up the local files, then copies them into the shared database (never overwrites). */
   migrateStore: () => post<QAStoreMigration>('/store/migrate', {}),
   projects: () => call<QAProject[]>('/projects'),

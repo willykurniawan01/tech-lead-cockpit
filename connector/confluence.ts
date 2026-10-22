@@ -445,6 +445,74 @@ export class ConfluenceClient {
     }
   }
 
+  /** Direct child pages (id, title, version), same v1 endpoint on Cloud and Data Center. */
+  async childPages(pageId: string): Promise<{ id: string; title: string; version: number }[]> {
+    const out: { id: string; title: string; version: number }[] = [];
+    for (let start = 0; start < 2_000; start += 200) {
+      const r = await this.request<{ results: { id: string; title: string; version?: { number?: number } }[]; size?: number }>(
+        `/rest/api/content/${encodeURIComponent(pageId)}/child/page?limit=200&start=${start}&expand=version`,
+      );
+      out.push(...r.results.map((p) => ({ id: String(p.id), title: p.title, version: Number(p.version?.number ?? 1) })));
+      if (r.results.length < 200) break;
+    }
+    return out;
+  }
+
+  /** Attachments of a page (id and file name), optionally only one file name. */
+  async attachments(pageId: string, filename?: string): Promise<{ id: string; title: string }[]> {
+    const out: { id: string; title: string }[] = [];
+    for (let start = 0; start < 5_000; start += 200) {
+      const r = await this.request<{ results: { id: string; title: string }[] }>(
+        `/rest/api/content/${encodeURIComponent(pageId)}/child/attachment?limit=200&start=${start}${filename ? `&filename=${encodeURIComponent(filename)}` : ''}`,
+      );
+      out.push(...r.results.map((a) => ({ id: String(a.id), title: a.title })));
+      if (r.results.length < 200 || filename) break;
+    }
+    return out;
+  }
+
+  /** A text attachment's content, or null when the page has no such file. */
+  async readAttachment(pageId: string, filename: string): Promise<string | null> {
+    const r = await this.request<{ results: { _links?: { download?: string } }[] }>(
+      `/rest/api/content/${encodeURIComponent(pageId)}/child/attachment?filename=${encodeURIComponent(filename)}`,
+    );
+    const link = r.results[0]?._links?.download;
+    if (!link) return null;
+    let res: Response;
+    try {
+      // Cloud redirects downloads to its media host with a signed URL; fetch follows it.
+      res = await fetch(this.base + link, { headers: { Authorization: this.authHeader() }, signal: AbortSignal.timeout(TIMEOUT_MS) });
+    } catch (err) {
+      throw new ConfluenceError(describeNetworkError(err), 502, 'network');
+    }
+    if (!res.ok) throw new ConfluenceError(`Gagal mengunduh lampiran ${filename} (${res.status}).`, res.status >= 500 ? 502 : 400, res.status >= 500 ? 'upstream' : 'bad-request');
+    return res.text();
+  }
+
+  /** Creates or replaces a file attached to a published page; any failure throws (unlike upsertAttachment). */
+  async putAttachment(pageId: string, filename: string, data: Buffer, contentType: string): Promise<void> {
+    const existing = await this.attachments(pageId, filename);
+    const form = new FormData();
+    form.append('file', new Blob([new Uint8Array(data)], { type: contentType }), filename);
+    form.append('minorEdit', 'true');
+    const path = existing[0]
+      ? `/rest/api/content/${encodeURIComponent(pageId)}/child/attachment/${existing[0].id}/data`
+      : `/rest/api/content/${encodeURIComponent(pageId)}/child/attachment`;
+    await this.request(path, { method: 'POST', body: form, headers: { 'X-Atlassian-Token': 'no-check' } });
+  }
+
+  /** Removes an attachment (to the space's trash). */
+  async deleteAttachment(attachmentId: string): Promise<void> {
+    await this.request(`/rest/api/content/${encodeURIComponent(attachmentId)}`, { method: 'DELETE' });
+  }
+
+  /** Whether the current account may update the page; undefined when Confluence doesn't say. */
+  async canUpdate(pageId: string): Promise<boolean | undefined> {
+    const p = await this.request<{ operations?: { operation?: string; targetType?: string }[] }>(`/rest/api/content/${encodeURIComponent(pageId)}?expand=operations`);
+    if (!Array.isArray(p.operations)) return undefined;
+    return p.operations.some((o) => o.operation === 'update');
+  }
+
   private fromCloud(p: CloudPage, spaceKey: string, linksBase?: string): PageInfo {
     let resolvedSpace = spaceKey;
     if (!resolvedSpace && p._links?.webui) {

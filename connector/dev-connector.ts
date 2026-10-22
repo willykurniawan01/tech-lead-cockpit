@@ -40,6 +40,8 @@ import { QA_KEYCHAIN_SERVICE, QaInputError, QaManager } from './qa/manager.ts';
 import { FileQaStore, QaConflictError } from './qa/store.ts';
 import { createPgPool, PgQaStore, QaStoreError } from './qa/pg-store.ts';
 import { connectionOf, QaStoreSwitch } from './qa/store-config.ts';
+import { ConfluenceQaStore } from './qa/confluence-store.ts';
+import { createHash } from 'node:crypto';
 import { moveToCentral } from './qa/store-migrate.ts';
 import { DATA_DIR } from './paths.ts';
 import { userInfo } from 'node:os';
@@ -306,6 +308,7 @@ export function devConnector(env: Env): Plugin {
 }
 
 export function connectorMiddleware(env: Env, deps: ConnectorDeps) {
+  qaConfluenceEnv ??= env;
   // Settings from the wizard (migrated from .env.local on the first run) override env for this process.
   const ready = process.env.VITEST
     ? Promise.resolve()
@@ -439,6 +442,7 @@ export function connectorMiddleware(env: Env, deps: ConnectorDeps) {
         if (Object.keys(updates).length > 0) {
           await updateEnvLocal(updates);
         }
+        qaStoreSynced = syncQaStore();
         return send(res, 200, { ok: true, message: 'Token Confluence berhasil disimpan ke Keychain.' });
       }
 
@@ -994,7 +998,15 @@ async function handleDrafts(route: string, req: IncomingMessage, res: ServerResp
 }
 
 /** E2E store from Settings → Penyimpanan E2E: files, or the shared PostgreSQL database. */
-const qaStores = new QaStoreSwitch({ readPassword: () => readKeychain(QA_STORE_SERVICE) });
+/** The env the middleware was created with (Confluence URL/auth come from it). */
+let qaConfluenceEnv: Env | undefined;
+/** The app's Confluence connection, for the Confluence store. */
+async function qaConfluence(): Promise<{ api: ConfluenceClient; key: string } | undefined> {
+  const { cfg } = await loadConfig(qaConfluenceEnv ?? (process.env as Env), () => readKeychain(CONFLUENCE_SERVICE));
+  if (!cfg) return undefined;
+  return { api: new ConfluenceClient(cfg), key: createHash('sha256').update(`${cfg.baseUrl}|${cfg.auth}|${cfg.email ?? ''}|${cfg.token}`).digest('hex') };
+}
+const qaStores = new QaStoreSwitch({ readPassword: () => readKeychain(QA_STORE_SERVICE), confluence: qaConfluence });
 let qaStoreSynced: Promise<void> | undefined;
 function syncQaStore(): Promise<void> {
   return settingsStore
@@ -1083,19 +1095,29 @@ async function handleQa(route: string, url: URL, req: IncomingMessage, res: Serv
       const body = await readJson<{ settings?: Partial<AppSettings['qaStore']>; password?: string }>(req, 16 * 1024);
       const saved = (await settingsStore.load()).settings.qaStore;
       const cfg = { ...saved, ...(body.settings ?? {}), port: Number(body.settings?.port ?? saved.port) || 5432 };
+      if (cfg.mode === 'confluence') {
+        const parent = String(cfg.confluenceParentId ?? '').match(/(\d{1,20})(?:[/?#].*)?$/)?.[1];
+        if (!cfg.confluenceSpace || !parent) throw new QaInputError('Isi space key dan ID (atau URL) halaman induk Confluence dulu.');
+        const conf = await qaConfluence();
+        if (!conf) throw new QaInputError('Confluence belum terhubung. Atur URL dan token Confluence di Koneksi dulu.');
+        const probe = await new ConfluenceQaStore(conf.api, { spaceKey: cfg.confluenceSpace, parentPageId: parent }).probe((id) => conf.api.canUpdate(id).catch(() => undefined));
+        if (probe.canUpdate === false) throw new QaInputError(`Halaman induk "${probe.title}" terbaca, tapi akun Confluence ini tidak boleh mengubahnya. Minta akses edit, atau pilih halaman lain.`);
+        return send(res, 200, { summary: `Terhubung ke Confluence: halaman induk "${probe.title}"${probe.canUpdate ? ', akun ini boleh mengubahnya' : ''}. Halaman proyek dibuat otomatis saat pertama dipakai.` });
+      }
       if (!cfg.host || !cfg.user || !cfg.database) throw new QaInputError('Isi host, database, dan user DB pusat dulu.');
       const conn = connectionOf(cfg);
       const password = (typeof body.password === 'string' && body.password) || ((await readKeychain(QA_STORE_SERVICE)) ?? undefined);
       const probe = new PgQaStore(createPgPool(conn, password), conn);
       try {
-        return send(res, 200, await probe.probe());
+        const r = await probe.probe();
+        return send(res, 200, { ...r, summary: `Terhubung ke PostgreSQL ${r.server}. Tabel E2E: ${r.schemaVersion ? `versi ${r.schemaVersion}` : 'belum ada (dibuat otomatis saat pertama dipakai)'}.` });
       } finally {
         await probe.close();
       }
     }
     if (route === 'POST /qa/store/migrate') {
       const target = qa.store;
-      if (target.kind !== 'postgres') throw new QaInputError('Pilih dan simpan DB pusat di Pengaturan → Penyimpanan E2E dulu.');
+      if (target.kind === 'file') throw new QaInputError('Pilih dan simpan penyimpanan bersama (Confluence atau DB pusat) di Pengaturan → Penyimpanan E2E dulu.');
       const by = await qaActor();
       const result = await moveToCentral(new FileQaStore(path.join(DATA_DIR, 'qa')), target, { backupRoot: path.join(DATA_DIR, 'qa-backups'), by });
       await audit({
@@ -1622,7 +1644,8 @@ async function handleSettings(route: string, req: IncomingMessage, res: ServerRe
       // A key in .env.local would win over the Keychain for these providers: drop it from this process.
       if (id === 'inferhub') delete env.INFERHUB_API_KEY;
       if (id === 'ninerouter') delete env.NINEROUTER_API_KEY;
-      if (id === 'qastore') qaStoreSynced = syncQaStore();
+      // The Confluence store follows the Confluence token too.
+      if (id === 'qastore' || id === 'confluence' || id === 'jira') qaStoreSynced = syncQaStore();
       return send(res, 200, await settingsResponse(env));
     }
     return fail(res, 404, { error: `Route tidak dikenal: ${route}`, code: 'not-found' });

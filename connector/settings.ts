@@ -48,7 +48,12 @@ export function validateSettings(raw: Partial<AppSettings>): AppSettings {
   const project = text(r.jira?.defaultProject, 10).toUpperCase();
   if (project && !/^[A-Z][A-Z0-9]{1,9}$/.test(project)) throw new SettingsInputError('Project key Jira tidak valid (mis. MU).');
   const store = r.qaStore ?? d.qaStore;
-  const storeMode = oneOf(store.mode, ['file', 'postgres'] as const, d.qaStore.mode);
+  const storeMode = oneOf(store.mode, ['file', 'postgres', 'confluence'] as const, d.qaStore.mode);
+  const storeSpace = text(store.confluenceSpace, 255);
+  if (storeSpace && !/^[A-Za-z0-9~_-]+$/.test(storeSpace)) throw new SettingsInputError('Space key Confluence tidak valid.');
+  // A page URL is accepted too: its id is kept.
+  const storeParent = text(store.confluenceParentId, 1000).match(/(?:pageId=|\/pages\/)?(\d{1,20})(?:[/?#].*)?$/)?.[1] ?? '';
+  if (storeMode === 'confluence' && (!storeSpace || !storeParent)) throw new SettingsInputError('Isi space key dan ID (atau URL) halaman induk Confluence dulu.');
   const storeHost = text(store.host, 253);
   if (storeHost && !/^[\w.-]+$/.test(storeHost)) throw new SettingsInputError('Host DB pusat tidak valid.');
   const storePort = Number(store.port) || d.qaStore.port;
@@ -83,7 +88,7 @@ export function validateSettings(raw: Partial<AppSettings>): AppSettings {
     },
     teams: { tenantId: text(r.teams?.tenantId, 100), clientId: text(r.teams?.clientId, 100) },
     identity: { name: text(r.identity?.name, 100), email },
-    qaStore: { mode: storeMode, host: storeHost, port: storePort, database: storeDb, user: storeUser, ssl: store.ssl === true },
+    qaStore: { mode: storeMode, host: storeHost, port: storePort, database: storeDb, user: storeUser, ssl: store.ssl === true, confluenceSpace: storeSpace, confluenceParentId: storeParent },
     setup: { completedAt: typeof r.setup?.completedAt === 'string' ? r.setup.completedAt : undefined, skipped: Array.isArray(r.setup?.skipped) ? r.setup.skipped.map(String).slice(0, 20) : [] },
   };
 }

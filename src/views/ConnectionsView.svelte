@@ -104,8 +104,7 @@
     storeBusy = 'test';
     storeTest = '';
     try {
-      const r = await qa.testStore($state.snapshot(storeForm), storePassword || undefined);
-      storeTest = `Terhubung ke PostgreSQL ${r.server}. Tabel E2E: ${r.schemaVersion ? `versi ${r.schemaVersion}` : 'belum ada (dibuat otomatis saat pertama dipakai)'}.`;
+      storeTest = (await qa.testStore($state.snapshot(storeForm), storePassword || undefined)).summary;
     } catch (e) {
       toasts.show((e as Error).message, 'err', 6000);
     } finally {
@@ -121,7 +120,7 @@
       storePassword = '';
       showStoreSetup = false;
       storeStatus = await qa.store().catch(() => null);
-      toasts.show(storeForm.mode === 'postgres' ? 'E2E sekarang memakai DB pusat.' : 'E2E sekarang memakai file lokal.', 'ok');
+      toasts.show(storeForm.mode === 'confluence' ? 'E2E sekarang disimpan di Confluence.' : storeForm.mode === 'postgres' ? 'E2E sekarang memakai DB pusat.' : 'E2E sekarang memakai file lokal.', 'ok');
     } catch (e) {
       toasts.show(`Gagal menyimpan: ${(e as Error).message}`, 'err');
     } finally {
@@ -132,7 +131,7 @@
   async function migrateStore() {
     const ok = await confirmDialog({
       title: 'Pindahkan data lokal ke DB pusat?',
-      message: `Folder data E2E lokal dibackup dulu, lalu test case, rencana journey, environment (tanpa token/password) dan riwayat run disalin ke ${storeStatus?.target ?? 'DB pusat'}. Data yang sudah ada di DB pusat tidak ditimpa, dan file lokal tetap ada.`,
+      message: `Folder data E2E lokal dibackup dulu, lalu test case, rencana journey, environment (tanpa token/password) dan riwayat run disalin ke ${storeStatus?.mode === 'confluence' ? 'Confluence' : 'DB pusat'} (${storeStatus?.target ?? '-'}). Data yang sudah ada di sana tidak ditimpa, dan file lokal tetap ada.`,
       confirmText: 'Pindahkan',
     });
     if (!ok) return;
@@ -525,7 +524,11 @@
     <div class="card-head">
       <Icon name="database" size={20} />
       <h2>Penyimpanan E2E</h2>
-      {#if storeStatus?.mode === 'postgres'}
+      {#if storeStatus?.error}
+        <span class="chip chip-warn">{storeStatus.mode === 'confluence' ? 'Confluence' : 'DB pusat'}: belum siap</span>
+      {:else if storeStatus?.mode === 'confluence'}
+        <span class="chip chip-ok"><Icon name="check" size={12} /> Confluence</span>
+      {:else if storeStatus?.mode === 'postgres'}
         <span class="chip chip-ok"><Icon name="check" size={12} /> DB pusat</span>
       {:else if storeStatus}
         <span class="chip">Lokal</span>
@@ -535,13 +538,13 @@
 
     <dl>
       <dt>Disimpan di</dt>
-      <dd>{storeStatus?.mode === 'postgres' ? `DB pusat (${storeStatus.target ?? '-'}), dipakai bersama QA Cockpit` : 'File di laptop ini (~/.tech-lead-cockpit/qa)'}</dd>
+      <dd>{storeStatus?.mode === 'confluence' ? `Confluence (${storeStatus.target ?? '-'}), dipakai bersama QA Cockpit` : storeStatus?.mode === 'postgres' ? `DB pusat (${storeStatus.target ?? '-'}), dipakai bersama QA Cockpit` : 'File di laptop ini (~/.tech-lead-cockpit/qa)'}</dd>
       <dt>Isi</dt><dd>Test case, grup, rencana journey, riwayat run, environment (token dan password tetap di Keychain masing-masing)</dd>
       <dt>Tercatat sebagai</dt><dd>{appSettings.value.identity.email || appSettings.value.identity.name || 'email git (belum diatur)'}</dd>
     </dl>
     {#if storeStatus?.error}<p class="alert"><Icon name="alert" /> {storeStatus.error}</p>{/if}
 
-    {#if storeStatus?.mode === 'postgres' && !showStoreSetup}
+    {#if storeStatus && storeStatus.mode !== 'file' && !showStoreSetup}
       <div class="setup-actions">
         <button class="btn btn-sm" onclick={migrateStore} disabled={storeBusy !== ''}>
           <Icon name="upload" size={13} /> {storeBusy === 'migrate' ? 'Memindahkan…' : 'Pindahkan data lokal ke DB pusat'}
@@ -561,8 +564,20 @@
       <div class="setup-form">
         <div class="form-check">
           <label><input type="radio" bind:group={storeForm.mode} value="file" /> File lokal (hanya laptop ini)</label>
+          <label><input type="radio" bind:group={storeForm.mode} value="confluence" /> Confluence (bersama QA)</label>
           <label><input type="radio" bind:group={storeForm.mode} value="postgres" /> DB pusat PostgreSQL (bersama QA)</label>
         </div>
+        {#if storeForm.mode === 'confluence'}
+          <div class="form-row">
+            <label for="qs-space">Space key</label>
+            <input id="qs-space" type="text" bind:value={storeForm.confluenceSpace} placeholder="QA" />
+          </div>
+          <div class="form-row">
+            <label for="qs-parent">Halaman induk (ID atau URL)</label>
+            <input id="qs-parent" type="text" bind:value={storeForm.confluenceParentId} placeholder="https://…/pages/123456/API+Testing" />
+            <small class="form-help">Halaman proyek, rencana, run, dan environment dibuat di bawah halaman ini. Memakai koneksi Confluence di atas; akunnya perlu akses edit ke halaman induk.</small>
+          </div>
+        {/if}
         {#if storeForm.mode === 'postgres'}
           <div class="form-row">
             <label for="qs-host">Host</label>
@@ -600,8 +615,8 @@
         </div>
         {#if storeTest}<p class="muted font-sm"><Icon name="check" size={12} /> {storeTest}</p>{/if}
         <div class="setup-actions">
-          {#if storeForm.mode === 'postgres'}
-            <button class="btn" onclick={testStore} disabled={storeBusy !== '' || !storeForm.host.trim() || !storeForm.user.trim()}>{storeBusy === 'test' ? 'Mengetes…' : 'Tes koneksi'}</button>
+          {#if storeForm.mode !== 'file'}
+            <button class="btn" onclick={testStore} disabled={storeBusy !== '' || (storeForm.mode === 'postgres' ? !storeForm.host.trim() || !storeForm.user.trim() : !storeForm.confluenceSpace.trim() || !storeForm.confluenceParentId.trim())}>{storeBusy === 'test' ? 'Mengetes…' : 'Tes koneksi'}</button>
           {/if}
           <button class="btn btn-primary" onclick={saveStore} disabled={storeBusy !== ''}><Icon name="check" size={14} /> {storeBusy === 'save' ? 'Menyimpan…' : 'Simpan'}</button>
           <button class="btn btn-ghost" onclick={() => (showStoreSetup = false)}>Batal</button>
