@@ -317,6 +317,40 @@ export interface QASuite {
   version?: number;
   /** Set by the store: who saved it last (name or email from Settings). */
   updatedBy?: string;
+  /** Local revision of a draft not sent yet; a save must carry it, like `version`. */
+  draftRev?: number;
+  /** Set when this is a local draft: changes not sent to the shared storage yet. */
+  draft?: QASuiteDraftInfo;
+}
+
+export interface QASuiteDraftInfo {
+  startedAt: string;
+  /** Changed, added or removed test cases (and suite fields) waiting for review. */
+  changes: number;
+  /** Someone sent changes after the draft started that touch the same test cases. */
+  behind?: boolean;
+}
+
+/** One reviewed change: a test case (key = its id) or a suite field (key = 'suite:<field>'). */
+export interface QASuiteChange {
+  key: string;
+  kind: 'added' | 'changed' | 'removed';
+  title: string;
+  group?: string;
+  /** Readable lines: 'Nama: a → b', 'Step "Login": request diubah'. */
+  details: string[];
+  before?: unknown;
+  after?: unknown;
+}
+
+export interface QASuiteReview {
+  projectId: string;
+  startedAt?: string;
+  changes: QASuiteChange[];
+  /** The published suite moved on since the draft started (someone else sent changes). */
+  published?: { version?: number; updatedBy?: string; updatedAt?: string };
+  /** Test cases changed both here and in what was published since: sending them is refused. */
+  conflicts: string[];
 }
 
 /** A TAD a project's test cases come from (read-only reference, e.g. for QA Cockpit). */

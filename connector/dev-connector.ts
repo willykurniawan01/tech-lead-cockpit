@@ -37,6 +37,7 @@ import { repoProjectPaths } from './releases/repos.ts';
 import type { ReleaseAiJob } from '../src/lib/release/types.ts';
 import { PdfPasswordError } from './pdf-unlock.ts';
 import { QA_KEYCHAIN_SERVICE, QaInputError, QaManager } from './qa/manager.ts';
+import { DraftedQaStore, QaDraftError } from './qa/drafts.ts';
 import { FileQaStore, QaConflictError } from './qa/store.ts';
 import { createPgPool, PgQaStore, QaStoreError } from './qa/pg-store.ts';
 import { connectionOf, QaStoreSwitch } from './qa/store-config.ts';
@@ -1007,6 +1008,8 @@ async function qaConfluence(): Promise<{ api: ConfluenceClient; key: string } | 
   return { api: new ConfluenceClient(cfg), key: createHash('sha256').update(`${cfg.baseUrl}|${cfg.auth}|${cfg.email ?? ''}|${cfg.token}`).digest('hex') };
 }
 const qaStores = new QaStoreSwitch({ readPassword: () => readKeychain(QA_STORE_SERVICE), confluence: qaConfluence });
+/** With shared storage, test case changes wait in ~/.tech-lead-cockpit/qa-drafts until reviewed and sent. */
+const qaDrafts = new DraftedQaStore(() => qaStores.current()!, path.join(DATA_DIR, 'qa-drafts'));
 let qaStoreSynced: Promise<void> | undefined;
 function syncQaStore(): Promise<void> {
   return settingsStore
@@ -1050,7 +1053,8 @@ function qaManager(): QaManager {
   if (existing && qaGlobal.__tlcQaModule !== QA_MODULE && !(typeof existing.isBusy === 'function' && existing.isBusy())) qaGlobal.__tlcQa = undefined;
   if (!qaGlobal.__tlcQa) qaGlobal.__tlcQaModule = QA_MODULE;
   qaGlobal.__tlcQa ??= new QaManager({
-    store: () => qaStores.current(),
+    // Local files (no shared storage) are the manager's own store: no drafts there.
+    store: () => (qaStores.current() ? qaDrafts : undefined),
     actor: qaActor,
     readSecret: (key) => readKeychain(QA_KEYCHAIN_SERVICE, `env:${key}`),
     writeSecret: (key, value) => writeKeychain(QA_KEYCHAIN_SERVICE, value, `env:${key}`),
@@ -1116,7 +1120,7 @@ async function handleQa(route: string, url: URL, req: IncomingMessage, res: Serv
       }
     }
     if (route === 'POST /qa/store/migrate') {
-      const target = qa.store;
+      const target = qaStores.current() ?? qa.store;
       if (target.kind === 'file') throw new QaInputError('Pilih dan simpan penyimpanan bersama (Confluence atau DB pusat) di Pengaturan → Penyimpanan E2E dulu.');
       const by = await qaActor();
       const result = await moveToCentral(new FileQaStore(path.join(DATA_DIR, 'qa')), target, { backupRoot: path.join(DATA_DIR, 'qa-backups'), by });
@@ -1177,7 +1181,25 @@ async function handleQa(route: string, url: URL, req: IncomingMessage, res: Serv
       const suspects = Array.isArray(suite.suspects) ? suite.suspects.slice(0, 50) : undefined;
       // Groups: cleaned names, and flows stored in the order they are shown and run.
       const grouped = withGroups({ ...suite, flows, groups: normalizeGroups(suite.groups) });
-      return send(res, 200, { suite: await qa.saveSuite({ ...grouped, suspects, flows: plan ? checkFlowsAgainstPlan(grouped.flows, plan) : grouped.flows, projectName: String(suite.projectName ?? '').slice(0, 300), version: Number.isInteger(suite.version) ? suite.version : undefined }) });
+      return send(res, 200, { suite: await qa.saveSuite({ ...grouped, suspects, flows: plan ? checkFlowsAgainstPlan(grouped.flows, plan) : grouped.flows, projectName: String(suite.projectName ?? '').slice(0, 300), version: Number.isInteger(suite.version) ? suite.version : undefined, draftRev: Number.isInteger(suite.draftRev) ? suite.draftRev : undefined }) });
+    }
+    if (route === 'GET /qa/suite/review') return send(res, 200, await qa.reviewSuite(url.searchParams.get('projectId') ?? ''));
+    if (route === 'POST /qa/suite/publish') {
+      const body = await readJson<{ projectId?: string; projectName?: string; keys?: unknown }>(req, 256 * 1024);
+      const keys = Array.isArray(body.keys) ? body.keys.map(String).slice(0, 5_000) : undefined;
+      const entry = { action: 'qa.suite.publish' as const, spaceKey: qaStores.status().target ?? '', title: String(body.projectName ?? body.projectId ?? '').slice(0, 200), attachments: 0 };
+      try {
+        const result = await qa.publishSuite(String(body.projectId ?? ''), keys);
+        await audit({ ...entry, ts: new Date().toISOString(), result: 'success', title: `${entry.title}: ${result.sent} perubahan test case`.slice(0, 300) }).catch(() => {});
+        return send(res, 200, result);
+      } catch (e) {
+        await audit({ ...entry, ts: new Date().toISOString(), result: 'failure', error: (e as Error).message }).catch(() => {});
+        throw e;
+      }
+    }
+    if (route === 'POST /qa/suite/discard') {
+      const body = await readJson<{ projectId?: string; keys?: unknown }>(req, 256 * 1024);
+      return send(res, 200, { suite: await qa.discardSuite(String(body.projectId ?? ''), Array.isArray(body.keys) ? body.keys.map(String).slice(0, 5_000) : undefined) });
     }
     if (route === 'POST /qa/generate') {
       const body = await readJson<QAGenerateRequest>(req, 4 * 1024 * 1024);
@@ -1265,7 +1287,7 @@ async function handleQa(route: string, url: URL, req: IncomingMessage, res: Serv
     }
     return fail(res, 404, { error: `Route tidak dikenal: ${route}`, code: 'not-found' });
   } catch (e) {
-    if (e instanceof QaInputError) throw new ConfluenceError(e.message, 400, 'bad-request');
+    if (e instanceof QaInputError || e instanceof QaDraftError) throw new ConfluenceError(e.message, 400, 'bad-request');
     // Someone saved first: the page offers to reload instead of overwriting.
     if (e instanceof QaConflictError) return fail(res, 409, { error: e.message, code: 'conflict', updatedBy: e.updatedBy, updatedAt: e.updatedAt });
     if (e instanceof QaStoreError) return fail(res, 503, { error: e.message, code: 'store-unavailable' });

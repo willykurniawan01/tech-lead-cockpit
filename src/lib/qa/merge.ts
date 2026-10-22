@@ -28,7 +28,7 @@ function stable(v: unknown): string {
 const same = (a: unknown, b: unknown) => stable(a) === stable(b);
 
 /** Fields the store sets on every save; never a reason for a conflict. */
-const META = new Set(['version', 'updatedBy', 'updatedAt', 'flows', 'groups']);
+const META = new Set(['version', 'updatedBy', 'updatedAt', 'flows', 'groups', 'draftRev', 'draft']);
 
 export function mergeSuites(base: QASuite, mine: QASuite, theirs: QASuite): SuiteMerge {
   const index = (s: QASuite) => new Map(s.flows.map((f) => [f.id, f]));

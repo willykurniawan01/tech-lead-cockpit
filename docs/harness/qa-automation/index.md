@@ -244,6 +244,15 @@ Data E2E (proyek, suite beserta grup, rencana journey, riwayat run, dan environm
 - urutan (milik saya bila hanya saya yang mengubah urutan), daftar grup (gabungan), field suite lain.
 Hanya test case yang sama (atau field suite yang sama, mis. catatan) yang berubah di kedua sisi menjadi konflik: `QaConflictError` dengan daftar yang bentrok ("Test case "X" sudah diubah oleh Y pada Z"). Berlaku untuk semua mode (file, Confluence, PostgreSQL).
 
+### Review sebelum kirim (draft lokal)
+Dengan penyimpanan bersama, perubahan test case **tidak langsung** ke Confluence. `DraftedQaStore` ([`connector/qa/drafts.ts`](../../../connector/qa/drafts.ts)) membungkus store bersama: setiap simpan suite (edit manual, generate, agent penulis, repair, Perbaiki dengan AI, undo) masuk ke draft lokal `<data>/qa-drafts/<projectId>.json` (0600). Rencana, run, environment, dan proyek tetap langsung ke store bersama.
+- **Draft** menyimpan suite terbit saat draft dimulai (`base`), suite draft, dan revisi lokal `draftRev`. Simpan ke draft wajib membawa `draftRev` yang dimuat; kalau tidak, 409 lalu `QaManager` menggabung per test case seperti biasa (kunci `served` = versi + `draftRev`). Kembali sama dengan yang terbit = draft dihapus.
+- **Perubahan orang lain** yang terkirim sementara itu digabung ke draft saat suite dibaca bila menyentuh test case lain. Bila menyentuh test case yang sama, draft ditandai `behind` dan test case itu muncul sebagai **bentrok** di review.
+- **Review** (`GET /qa/suite/review`): `diffSuites(base, draft)` ([`src/lib/qa/suite-diff.ts`](../../../src/lib/qa/suite-diff.ts)) per test case (baru/diubah/dihapus, baris per field dan step, perbandingan JSON) plus catatan, urutan grup, dan dugaan bug.
+- **Kirim** (`POST /qa/suite/publish`, semua atau `keys` terpilih, dengan konfirmasi): `applyChanges(base, draft, keys)` lalu simpan ke store bersama dengan versinya (digabung `mergeSuites` bila sudah bergeser; test case bentrok ditolak 409). Sisanya tetap di draft di atas versi baru. Audit `qa.suite.publish`.
+- **Buang** (`POST /qa/suite/discard`, semua atau per test case) mengembalikan test case ke versi terbit.
+- UI: banner "N perubahan test case belum dikirim" dan dialog [`SuiteReview.svelte`](../../../src/projects/SuiteReview.svelte) di panel. `drafts.ts`, `suite-diff.ts`, dan `SuiteReview.svelte` **identik** di Tech Lead Cockpit dan QA Cockpit.
+
 - **Tabel** (dibuat dan di-upgrade oleh app, `MIGRATIONS` di `pg-store.ts`, tercatat di `schema_version`): `qa_projects` (id, name, `tads` jsonb: judul, draftId, Confluence page id/url, Jira keys), `qa_suites`/`qa_plans`/`qa_environments` (`data` jsonb, `version`, `updated_at`, `updated_by`), `qa_runs` (id, project_id, started_at, status, environment_id, summary, data). Migrasi baru = tambah entri ke `MIGRATIONS`, jangan ubah yang sudah ada. App yang lebih lama dari skema menolak jalan ("Perbarui app dulu").
 - **Tanpa rahasia.** Token, password DB, dan variabel rahasia environment tetap di Keychain tiap user dengan kunci `env:<id>` yang sama, jadi environment bersama dipakai dengan kredensial masing-masing. `storableEnvironment` membuang field status Keychain sebelum disimpan.
 - **Konflik simpan (optimistic concurrency).** Suite, rencana, dan environment membawa `version`. Simpan hanya berhasil bila versinya masih sama (`UPDATE … WHERE version = $expected`, buat baru = `version` 0). Bila tidak, connector membalas **409** `{ code: 'conflict', updatedBy, updatedAt }` dengan pesan "… sudah diubah oleh X pada Y. Perubahan Anda belum disimpan", lalu UI menawarkan **Muat ulang** (`handleConflict`). Tidak pernah menimpa diam-diam. Hasil generate dan rencana baru dari agent disimpan di atas versi saat job dimulai. Agent penulis, repair, dan perbaikan membaca ulang lalu menerapkan perubahannya lagi (`updateSuite`).
@@ -260,6 +269,9 @@ Hanya test case yang sama (atau field suite yang sama, mis. catatan) yang beruba
 | `POST /qa/store/test` | Tes isian form (belum disimpan) atau yang tersimpan: PostgreSQL (versi server dan skema, tanpa membuat tabel) atau Confluence (halaman induk dan izin edit). Balasan `{ summary }` |
 | `POST /qa/store/migrate` | Backup lalu salin data lokal ke penyimpanan bersama (Confluence atau DB pusat), audit |
 | `GET /qa/projects`, `POST /qa/projects` | Daftar proyek; upsert nama dan TAD |
+| `GET /qa/suite/review` | Perubahan draft lokal per test case dan yang bentrok |
+| `POST /qa/suite/publish` | Kirim perubahan draft (semua atau `keys`) ke store bersama, audit `qa.suite.publish` |
+| `POST /qa/suite/discard` | Buang perubahan draft (semua atau `keys`) |
 
 ---
 

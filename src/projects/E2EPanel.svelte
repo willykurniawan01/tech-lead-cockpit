@@ -30,6 +30,7 @@
   import E2EEnvironmentModal from './E2EEnvironmentModal.svelte';
   import E2ELogViewer from './E2ELogViewer.svelte';
   import FlowEditor from './FlowEditor.svelte';
+  import SuiteReview from './SuiteReview.svelte';
   import E2EPipeline from './E2EPipeline.svelte';
   import E2ERequirements from './E2ERequirements.svelte';
   import { bugs } from '../lib/bugs/client';
@@ -992,6 +993,8 @@
       </button>
     </div>
   </header>
+
+  <SuiteReview projectId={project.id} projectName={project.name} bind:suite onreload={() => load(project.id)} />
 
   {#if generating}
     <div class="banner">

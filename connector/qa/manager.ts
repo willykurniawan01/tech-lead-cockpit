@@ -3,6 +3,7 @@ import { mkdir, mkdtemp, readdir, readFile, rename, rm } from 'node:fs/promises'
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { AiSelection } from '../../src/lib/ai/types.ts';
+import type { QASuiteReview } from '../../src/lib/qa/types.ts';
 import type { QAAgentJob, QADatabase, QADbConnection, QADbResult, QADbServer, QAEnvironment, QAPipeline, QAPlan, QAProject, QASuspect, QAFlow, QAFlowResult, QAGenerateJob, QAGenerateRequest, QARun, QARunRequest, QASuite, QATadRef } from '../../src/lib/qa/types.ts';
 import { executeSetup, listDatabases, QaDbError, queryReadOnly, schemaSummary, testConnection } from './db.ts';
 import { matchDatabases } from '../../src/lib/qa/db-match.ts';
@@ -13,6 +14,7 @@ import { buildFixPrompt, buildPlanPrompt, buildRepairPrompt, checkFlowsAgainstPl
 import { verifyEvidence } from '../trace/verify.ts';
 import { declaredTypes, runFlow, summarize } from './runner.ts';
 import { DATA_DIR } from '../paths.ts';
+import { DraftedQaStore } from './drafts.ts';
 import { FileQaStore, QaConflictError, type QaStore } from './store.ts';
 
 /**
@@ -168,6 +170,9 @@ function slug(name: string): string {
   const base = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40) || 'env';
   return `${base}-${randomUUID().slice(0, 6)}`;
 }
+
+/** A suite as handed out: its version, and its draft revision while changes wait for review. */
+const servedKey = (s: QASuite) => `${s.projectId}@${s.version ?? 0}.${s.draftRev ?? '-'}`;
 
 export class QaManager {
   private readonly dir: string;
@@ -411,7 +416,7 @@ export class QaManager {
 
   private remember(suite: QASuite | null): QASuite | null {
     if (!suite) return suite;
-    this.served.set(`${suite.projectId}@${suite.version ?? 0}`, structuredClone(suite));
+    this.served.set(servedKey(suite), structuredClone(suite));
     // A handful per project is plenty: a page holds its version for minutes, not hours.
     while (this.served.size > 50) this.served.delete(this.served.keys().next().value!);
     return suite;
@@ -479,7 +484,7 @@ export class QaManager {
     try {
       return this.remember(await this.store.saveSuite(mine, by))!;
     } catch (e) {
-      const base = e instanceof QaConflictError ? this.served.get(`${mine.projectId}@${mine.version ?? 0}`) : undefined;
+      const base = e instanceof QaConflictError ? this.served.get(servedKey(mine)) : undefined;
       if (!base) throw e;
       for (let attempt = 1; ; attempt++) {
         const theirs = await this.store.getSuite(mine.projectId);
@@ -487,12 +492,36 @@ export class QaManager {
         const merged = mergeSuites(base, mine, theirs);
         if ('conflicts' in merged) throw new QaConflictError('suite', theirs.updatedBy, theirs.updatedAt, merged.conflicts);
         try {
-          return this.remember(await this.store.saveSuite({ ...merged.suite, version: theirs.version }, by))!;
+          return this.remember(await this.store.saveSuite({ ...merged.suite, version: theirs.version, draftRev: theirs.draftRev }, by))!;
         } catch (again) {
           if (!(again instanceof QaConflictError) || attempt >= SAVE_ATTEMPTS) throw again;
         }
       }
     }
+  }
+
+  // Review before sending (drafts) ------------------------------------------------------------
+
+  private drafts(): DraftedQaStore {
+    const store = this.store;
+    if (!(store instanceof DraftedQaStore)) throw new QaInputError('Penyimpanan ini tidak memakai draft.');
+    return store;
+  }
+
+  /** Test case changes waiting in the local draft, against what is published. */
+  reviewSuite(projectId: string): Promise<QASuiteReview> {
+    return this.drafts().reviewSuite(this.projectId(projectId));
+  }
+
+  /** Sends the chosen draft changes (all when `keys` is absent) to the shared storage. */
+  async publishSuite(projectId: string, keys?: string[]): Promise<{ suite: QASuite; sent: number }> {
+    const result = await this.drafts().publishSuite(this.projectId(projectId), keys, await this.actor());
+    this.remember(result.suite);
+    return result;
+  }
+
+  async discardSuite(projectId: string, keys?: string[]): Promise<QASuite | null> {
+    return this.remember(await this.drafts().discardSuite(this.projectId(projectId), keys));
   }
 
   /**

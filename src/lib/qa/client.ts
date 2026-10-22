@@ -1,7 +1,7 @@
 import { api, connectorDownMessage } from '../api-base';
 import type { AiSelection } from '../ai/types';
 import type { AppSettings } from '../settings/types';
-import type { QAAgentJob, QAEnvironment, QAGenerateJob, QAGenerateRequest, QAPipeline, QAPlan, QAProject, QARun, QARunRequest, QAStoreMigration, QAStoreStatus, QASuite, QATadRef } from './types';
+import type { QAAgentJob, QAEnvironment, QAGenerateJob, QAGenerateRequest, QAPipeline, QAPlan, QAProject, QARun, QARunRequest, QAStoreMigration, QAStoreStatus, QASuite, QASuiteReview, QATadRef } from './types';
 
 const HEADERS = { 'Content-Type': 'application/json', 'X-TLC-Client': '1' };
 
@@ -56,6 +56,12 @@ export const qa = {
   suite: (projectId: string, adopt?: { projectName: string; draftIds: string[] }) =>
     call<{ suite: QASuite | null }>(`/suite${q({ projectId, ...(adopt ? { projectName: adopt.projectName, draftIds: adopt.draftIds.join(',') } : {}) })}`).then((r) => r.suite),
   saveSuite: (suite: QASuite) => post<{ suite: QASuite }>('/suite', { suite }).then((r) => r.suite),
+  /** Test case changes waiting in the local draft (saves stay on this laptop until sent). */
+  reviewSuite: (projectId: string) => call<QASuiteReview>(`/suite/review${q({ projectId })}`),
+  /** Sends the chosen draft changes (all when `keys` is absent) to Workspace QA. */
+  publishSuite: (projectId: string, projectName: string, keys?: string[]) => post<{ suite: QASuite; sent: number }>('/suite/publish', { projectId, projectName, keys }),
+  /** Throws away the chosen draft changes (all when `keys` is absent). */
+  discardSuite: (projectId: string, keys?: string[]) => post<{ suite: QASuite | null }>('/suite/discard', { projectId, keys }).then((r) => r.suite),
   generate: (req: QAGenerateRequest) => post<QAGenerateJob>('/generate', req),
   job: (id: string) => call<{ job: QAGenerateJob | null }>(`/generate${q({ id })}`).then((r) => r.job),
   latestJob: (projectId: string) => call<{ job: QAGenerateJob | null }>(`/generate${q({ projectId })}`).then((r) => r.job),
