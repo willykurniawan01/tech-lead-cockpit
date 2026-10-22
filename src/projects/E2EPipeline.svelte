@@ -3,6 +3,7 @@
   import { confirmDialog } from '../components/confirm.svelte';
   import { toasts } from '../components/toast.svelte';
   import { qa } from '../lib/qa/client';
+  import { handleConflict } from '../lib/qa/conflict';
   import type { QAAgentJob, QAPipeline, QAPlan, QAPlanStage } from '../lib/qa/types';
 
   /**
@@ -102,7 +103,11 @@
       dirty = false;
       return true;
     } catch (e) {
-      toasts.show((e as Error).message, 'err');
+      const reload = async () => {
+        plan = (await qa.pipeline(projectId)).plan;
+        dirty = false;
+      };
+      if (!(await handleConflict(e, reload))) toasts.show((e as Error).message, 'err');
       return false;
     } finally {
       saving = false;

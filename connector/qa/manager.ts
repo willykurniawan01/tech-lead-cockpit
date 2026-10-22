@@ -1,9 +1,9 @@
 import { randomUUID } from 'node:crypto';
-import { mkdir, mkdtemp, readdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, readFile, rename, rm } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { AiSelection } from '../../src/lib/ai/types.ts';
-import type { QAAgentJob, QADatabase, QADbConnection, QADbResult, QADbServer, QAEnvironment, QAPipeline, QAPlan, QASuspect, QAFlow, QAFlowResult, QAGenerateJob, QAGenerateRequest, QARun, QARunRequest, QASuite } from '../../src/lib/qa/types.ts';
+import type { QAAgentJob, QADatabase, QADbConnection, QADbResult, QADbServer, QAEnvironment, QAPipeline, QAPlan, QAProject, QASuspect, QAFlow, QAFlowResult, QAGenerateJob, QAGenerateRequest, QARun, QARunRequest, QASuite, QATadRef } from '../../src/lib/qa/types.ts';
 import { executeSetup, listDatabases, QaDbError, queryReadOnly, schemaSummary, testConnection } from './db.ts';
 import { matchDatabases } from '../../src/lib/qa/db-match.ts';
 import { buildQaPrompt, dedupeStepIds, parseQaReply, QA_SYSTEM_PROMPT } from './generator.ts';
@@ -12,17 +12,20 @@ import { buildFixPrompt, buildPlanPrompt, buildRepairPrompt, checkFlowsAgainstPl
 import { verifyEvidence } from '../trace/verify.ts';
 import { declaredTypes, runFlow, summarize } from './runner.ts';
 import { DATA_DIR } from '../paths.ts';
+import { FileQaStore, QaConflictError, type QaStore } from './store.ts';
 
 /**
- * E2E state: environments, one suite per TAD draft and its run history, all under
- * ~/.tech-lead-cockpit/qa (0700). Environment secrets live in the Keychain, never in these files.
- * Generation and runs are background jobs the UI polls, so a reload doesn't lose them.
+ * E2E state: environments, one suite per project and its run history, kept in a QaStore: files
+ * under ~/.tech-lead-cockpit/qa (0700), or the shared PostgreSQL database chosen in Settings.
+ * Environment secrets live in the Keychain, never in the store. Generation and runs are background
+ * jobs the UI polls, so a reload doesn't lose them.
  */
 
 export const QA_KEYCHAIN_SERVICE = 'tech-lead-cockpit.qa';
-const KEEP_RUNS = 30;
 /** Reading the codebase makes generation slower. */
 const GENERATE_TIMEOUT_MS = 20 * 60_000;
+/** Background agents re-read and reapply their change when someone saved the suite in between. */
+const SAVE_ATTEMPTS = 3;
 /** Pipeline agents running at once (writers, repairers); the CLI's usage limits are shared. */
 const DEFAULT_CONCURRENCY = 3;
 const MAX_CONCURRENCY = 5;
@@ -35,7 +38,12 @@ const ID = /^[A-Za-z0-9_-]{1,64}$/;
 export class QaInputError extends Error {}
 
 export interface QaDeps {
+  /** Folder of the file store (also where suites from before projects existed are adopted from). */
   dir?: string;
+  /** The store in use (Settings: files or the shared database); the file store in `dir` when absent. */
+  store?: () => QaStore | undefined;
+  /** Who is saving (name or email from Settings), recorded as updated_by. */
+  actor?: () => Promise<string | undefined>;
   /** `key` is the environment id, or `<id>:vars` for its secret variables (a JSON object). */
   readSecret: (key: string) => Promise<string | null>;
   writeSecret: (key: string, value: string) => Promise<boolean>;
@@ -150,6 +158,8 @@ export function validateEnvironment(raw: Partial<QAEnvironment>): QAEnvironment 
     dbServer: cleanServer(raw.dbServer),
     databases: cleanDatabases(raw.databases),
     timeoutMs: Number.isFinite(timeoutMs) ? Math.min(Math.max(timeoutMs, 1_000), 300_000) : 30_000,
+    // The version it was loaded with: a save over someone else's newer one is refused.
+    ...(Number.isInteger(raw.version) && Number(raw.version) >= 0 ? { version: Number(raw.version) } : {}),
   };
 }
 
@@ -160,6 +170,7 @@ function slug(name: string): string {
 
 export class QaManager {
   private readonly dir: string;
+  private readonly fileStore: FileQaStore;
   private readonly jobs = new Map<string, QAGenerateJob & { cancel?: () => void }>();
   private readonly runs = new Map<string, { run: QARun; cancelled: boolean }>();
   private readonly pipelines = new Map<string, QAPipeline>();
@@ -169,13 +180,19 @@ export class QaManager {
 
   constructor(private readonly deps: QaDeps) {
     this.dir = deps.dir ?? join(DATA_DIR, 'qa');
+    this.fileStore = new FileQaStore(this.dir);
   }
 
-  private async write(file: string, data: unknown) {
-    await mkdir(join(file, '..'), { recursive: true, mode: 0o700 });
-    await writeFile(file, JSON.stringify(data, null, 2), { mode: 0o600 });
+  /** The store chosen in Settings (resolved per call, so a change applies without a restart). */
+  get store(): QaStore {
+    return this.deps.store?.() ?? this.fileStore;
   }
 
+  private async actor(): Promise<string | undefined> {
+    return (await this.deps.actor?.().catch(() => undefined)) || undefined;
+  }
+
+  /** Only for the per-TAD suites from before projects existed (always files). */
   private async read<T>(file: string): Promise<T | undefined> {
     try {
       return JSON.parse(await readFile(file, 'utf8')) as T;
@@ -200,15 +217,13 @@ export class QaManager {
     );
   }
 
-  private envFile = () => join(this.dir, 'environments.json');
-
   /**
    * Databases saved before servers existed (each with its own host): when they share one server,
    * that becomes the environment's server (password copied), and each gets its service guessed
-   * from the database name. Runs once per environment.
+   * from the database name. Runs once per environment. Returns the environments it changed.
    */
-  private async migrateDatabases(envs: QAEnvironment[]): Promise<boolean> {
-    let changed = false;
+  private async migrateDatabases(envs: QAEnvironment[]): Promise<QAEnvironment[]> {
+    const changed: QAEnvironment[] = [];
     for (const env of envs) {
       const legacy = (env.databases ?? []).filter((d) => d.host);
       if (env.dbServer || !legacy.length) continue;
@@ -224,14 +239,20 @@ export class QaManager {
         void this.deps.deleteSecret(dbSecretKey(env.id, d.name));
         return { name: service ?? d.name, ...(service ? { service } : {}), database: d.database };
       });
-      changed = true;
+      changed.push(env);
     }
     return changed;
   }
 
   async listEnvironments(): Promise<QAEnvironment[]> {
-    const envs = (await this.read<QAEnvironment[]>(this.envFile())) ?? [];
-    if (await this.migrateDatabases(envs)) await this.write(this.envFile(), envs);
+    let envs = await this.store.listEnvironments();
+    const migrated = await this.migrateDatabases(envs);
+    if (migrated.length) {
+      const by = await this.actor();
+      // Someone else saving first is fine: their copy is migrated the next time.
+      for (const env of migrated) await this.store.saveEnvironment(env, by).catch((e) => { if (!(e instanceof QaConflictError)) throw e; });
+      envs = await this.store.listEnvironments();
+    }
     return Promise.all(
       envs.map(async (e) => ({
         ...e,
@@ -258,9 +279,15 @@ export class QaManager {
    */
   async saveEnvironment(raw: Partial<QAEnvironment>, secret?: string, secretVariables?: Record<string, string>, dbPasswords?: Record<string, string>, dbServerPassword?: string): Promise<QAEnvironment[]> {
     const env = validateEnvironment(raw);
-    const envs = (await this.read<QAEnvironment[]>(this.envFile())) ?? [];
+    const envs = await this.store.listEnvironments();
     const index = env.id ? envs.findIndex((e) => e.id === env.id) : -1;
-    if (index < 0) env.id = slug(env.name);
+    if (index < 0) {
+      env.id = slug(env.name);
+      env.version = 0;
+    } else if ((env.version ?? 0) !== (envs[index].version ?? 0)) {
+      // Checked before any Keychain change, so a refused save leaves the secrets as they were.
+      throw new QaConflictError('environment', envs[index].updatedBy, envs[index].updatedAt);
+    }
     if (dbServerPassword !== undefined) {
       if (dbServerPassword === '' || !env.dbServer) await this.deps.deleteSecret(serverSecretKey(env.id));
       else if (!(await this.deps.writeSecret(serverSecretKey(env.id), dbServerPassword))) throw new QaInputError('Gagal menyimpan password database ke Keychain.');
@@ -286,9 +313,7 @@ export class QaManager {
       // A name can't be both plain and secret.
       for (const k of Object.keys(next)) delete env.variables[k];
     }
-    if (index < 0) envs.push(env);
-    else envs[index] = env;
-    await this.write(this.envFile(), envs);
+    await this.store.saveEnvironment(env, await this.actor());
     return this.listEnvironments();
   }
 
@@ -335,7 +360,7 @@ export class QaManager {
   }
 
   private async savedEnv(envId: string): Promise<QAEnvironment> {
-    const env = (await this.read<QAEnvironment[]>(this.envFile()))?.find((e) => e.id === envId);
+    const env = (await this.store.listEnvironments()).find((e) => e.id === envId);
     if (!env) throw new QaInputError('Environment tidak ditemukan; simpan dulu.');
     return env;
   }
@@ -368,13 +393,10 @@ export class QaManager {
   }
 
   async deleteEnvironment(id: string): Promise<QAEnvironment[]> {
-    const envs = (await this.read<QAEnvironment[]>(this.envFile())) ?? [];
+    const envs = await this.store.listEnvironments();
     for (const d of envs.find((e) => e.id === id)?.databases ?? []) await this.deps.deleteSecret(dbSecretKey(id, d.name));
     await this.deps.deleteSecret(serverSecretKey(id));
-    await this.write(
-      this.envFile(),
-      envs.filter((e) => e.id !== id),
-    );
+    await this.store.deleteEnvironment(id);
     await this.deps.deleteSecret(id);
     await this.deps.deleteSecret(`${id}:vars`);
     return this.listEnvironments();
@@ -382,14 +404,19 @@ export class QaManager {
 
   // Suites ---------------------------------------------------------------------------------
 
-  private suiteFile = (projectId: string) => join(this.dir, 'suites', `${this.projectId(projectId)}.json`);
+  private suiteFile = (projectId: string) => this.fileStore.suiteFile(this.projectId(projectId));
 
   async getSuite(projectId: string): Promise<QASuite | null> {
-    const suite = await this.read<QASuite>(this.suiteFile(projectId));
+    const suite = await this.store.getSuite(this.projectId(projectId));
     if (!suite) return null;
     // Steps keyed by id in the UI and in run results must be unique; heal older suites once.
     const healed = dedupeStepIds(suite.flows ?? []);
-    if (dedupeStepIds(suite.undo?.flows ?? []) || healed) await this.write(this.suiteFile(projectId), suite);
+    if (dedupeStepIds(suite.undo?.flows ?? []) || healed) {
+      return this.store.saveSuite(suite, await this.actor()).catch((e) => {
+        if (e instanceof QaConflictError) return this.store.getSuite(projectId);
+        throw e;
+      });
+    }
     return suite;
   }
 
@@ -400,7 +427,8 @@ export class QaManager {
   async adoptLegacy(projectId: string, projectName: string, draftIds: string[]): Promise<QASuite | null> {
     const id = this.projectId(projectId);
     const current = await this.getSuite(id);
-    if (current) return current;
+    // Those suites only ever existed as files; the shared database starts from projects.
+    if (current || this.store.kind !== 'file') return current;
     const legacy: { draftId: string; suite: QASuite & { draftId?: string; tadTitle?: string } }[] = [];
     for (const draftId of draftIds.filter((d) => ID.test(d) && d !== id)) {
       const suite = await this.read<QASuite & { draftId?: string; tadTitle?: string }>(this.suiteFile(draftId));
@@ -415,19 +443,36 @@ export class QaManager {
     for (const { draftId } of legacy) {
       await rename(this.suiteFile(draftId), join(archive, `${draftId}.json`)).catch(() => {});
       // Run history moves along (the old runs still say draftId/tadTitle; they are read as is).
-      for (const name of await readdir(this.runDir(draftId)).catch(() => [] as string[])) {
-        await mkdir(this.runDir(id), { recursive: true, mode: 0o700 });
-        await rename(join(this.runDir(draftId), name), join(this.runDir(id), name)).catch(() => {});
+      const from = this.fileStore.runDir(draftId);
+      for (const name of await readdir(from).catch(() => [] as string[])) {
+        await mkdir(this.fileStore.runDir(id), { recursive: true, mode: 0o700 });
+        await rename(join(from, name), join(this.fileStore.runDir(id), name)).catch(() => {});
       }
-      await rm(this.runDir(draftId), { recursive: true, force: true });
+      await rm(from, { recursive: true, force: true });
     }
     return merged;
   }
 
+  /** Saves over the version `suite` was loaded with; QaConflictError when someone saved in between. */
   async saveSuite(suite: QASuite): Promise<QASuite> {
     const saved = { ...suite, projectId: this.projectId(suite.projectId), updatedAt: new Date().toISOString() };
-    await this.write(this.suiteFile(saved.projectId), saved);
-    return saved;
+    return this.store.saveSuite(saved, await this.actor());
+  }
+
+  /**
+   * Read-change-save for background agents: on a conflict the latest suite is read and `fn`
+   * applied again (their changes are per flow), instead of failing or overwriting.
+   */
+  private async updateSuite(projectId: string, fn: (current: QASuite | null) => QASuite | null): Promise<QASuite | null> {
+    for (let attempt = 1; ; attempt++) {
+      const next = fn(await this.getSuite(projectId));
+      if (!next) return null;
+      try {
+        return await this.saveSuite(next);
+      } catch (e) {
+        if (!(e instanceof QaConflictError) || attempt >= SAVE_ATTEMPTS) throw e;
+      }
+    }
   }
 
   // Generation -----------------------------------------------------------------------------
@@ -439,7 +484,7 @@ export class QaManager {
   private async prepareContext(req: QAGenerateRequest, progress: (text: string) => void): Promise<{ req: QAGenerateRequest; codebase?: { root: string; folders: string[] }; warning?: string }> {
     // The environment's databases: their schema lets the AI write real-data queries (never passwords).
     req = { ...req, databases: undefined };
-    const env = req.environmentId ? (await this.read<QAEnvironment[]>(this.envFile()))?.find((e) => e.id === req.environmentId) : undefined;
+    const env = req.environmentId ? (await this.store.listEnvironments()).find((e) => e.id === req.environmentId) : undefined;
     if (env?.databases?.length) {
       // Only the databases of the selected tasks' services (a project has many microservices).
       const wanted = new Set(req.tasks.map((t) => t.service?.toLowerCase()).filter(Boolean));
@@ -491,6 +536,8 @@ export class QaManager {
     const busy = [...this.jobs.values()].find((j) => j.projectId === projectId && j.status === 'running');
     if (busy) return busy;
 
+    // The result replaces the suite as it is now: a save by someone else meanwhile makes it fail, not vanish.
+    const baseVersion = (await this.getSuite(projectId))?.version;
     const job: QAGenerateJob & { cancel?: () => void } = { id: randomUUID(), projectId, status: 'running', startedAt: new Date().toISOString(), progress: 'Menyiapkan prompt…' };
     this.jobs.set(job.id, job);
     const ctx = await this.prepareContext(req, (t) => (job.progress = t));
@@ -534,6 +581,7 @@ export class QaManager {
           generatedAt: now,
           ai: req.ai,
           updatedAt: now,
+          version: baseVersion,
         };
         job.suite = await this.saveSuite(suite);
         job.status = 'done';
@@ -580,8 +628,6 @@ export class QaManager {
 
   // Pipeline: planner → review → writers per stage (parallel) → check → run → repair ------------
 
-  private planFile = (projectId: string) => join(this.dir, 'plans', `${this.projectId(projectId)}.json`);
-
   private pipeline(projectId: string): QAPipeline {
     let p = this.pipelines.get(projectId);
     if (!p) {
@@ -592,7 +638,7 @@ export class QaManager {
   }
 
   async getPlan(projectId: string): Promise<QAPlan | null> {
-    return (await this.read<QAPlan>(this.planFile(projectId))) ?? null;
+    return this.store.getPlan(this.projectId(projectId));
   }
 
   /** The plan and the pipeline's agents (live), for the UI. */
@@ -605,8 +651,7 @@ export class QaManager {
   async savePlan(plan: QAPlan): Promise<QAPlan> {
     const saved: QAPlan = { ...plan, projectId: this.projectId(plan.projectId), updatedAt: new Date().toISOString() };
     if (!saved.stages?.length) throw new QaInputError('Rencana butuh minimal satu tahap.');
-    await this.write(this.planFile(saved.projectId), saved);
-    return saved;
+    return this.store.savePlan(saved, await this.actor());
   }
 
   private busyAgents(p: QAPipeline) {
@@ -680,6 +725,8 @@ export class QaManager {
     if (!req.tasks?.length) throw new QaInputError('Pilih minimal satu task.');
     const p = this.pipeline(projectId);
     if (this.busyAgents(p).length) throw new QaInputError('Masih ada agent E2E yang berjalan untuk proyek ini.');
+    // A new plan replaces the one there now; an edit saved meanwhile makes it fail instead.
+    const baseVersion = (await this.getPlan(projectId))?.version;
     const job = this.newAgent(projectId, 'plan', 'Rencana journey E2E', req.ai);
     p.agents = [job];
     p.phase = 'planning';
@@ -709,7 +756,7 @@ export class QaManager {
         const touched = changed ? await changed().catch(() => []) : [];
         if (touched.length) plan.notes = `${plan.notes ? `${plan.notes}\n\n` : ''}PERINGATAN: working tree berubah selama perencanaan di ${touched.join(', ')}.`;
         if (warning) plan.notes = `PERINGATAN: ${warning}${plan.notes ? `\n\n${plan.notes}` : ''}`;
-        await this.savePlan(plan);
+        await this.savePlan({ ...plan, version: baseVersion });
         await this.finishAgent(job, req.projectName, { result: `${plan.stages.length} tahap` });
       } catch (e) {
         await this.finishAgent(job, req.projectName, { error: e });
@@ -743,8 +790,8 @@ export class QaManager {
     const written = new Map<string, QAFlow[]>();
 
     // Existing flows of the stages being rewritten are replaced as each stage finishes.
-    const merge = async () => {
-      const current = (await this.getSuite(projectId))?.flows ?? [];
+    const merge = () => this.updateSuite(projectId, (prev) => {
+      const current = prev?.flows ?? [];
       const finished = new Set(plan.stages.filter((st) => written.has(st.id)).map((st) => st.title));
       const byStage = new Map<string, QAFlow[]>();
       const others: QAFlow[] = [];
@@ -755,12 +802,11 @@ export class QaManager {
       }
       const ordered = plan.stages.flatMap((st) => written.get(st.id) ?? byStage.get(st.title) ?? []);
       const now = new Date().toISOString();
-      const prev = await this.getSuite(projectId);
       // Groups the user saved (made, renamed, reordered) keep their place; stages not among them follow in
       // plan order. The saved list itself is left as is, so a stage that finishes first doesn't fix the order.
       const flows = arrangeFlows([...ordered, ...others], groupOrder({ groups: prev?.groups, flows: [...ordered, ...others] }));
-      await this.saveSuite({ ...(prev ?? {}), projectId, projectName: plan.projectName, flows: checkFlowsAgainstPlan(flows, plan), generatedAt: now, ai, updatedAt: now });
-    };
+      return { ...(prev ?? {}), projectId, projectName: plan.projectName, flows: checkFlowsAgainstPlan(flows, plan), generatedAt: now, ai, updatedAt: now };
+    });
 
     void (async () => {
       await this.pool(jobs, p.concurrency, async (job) => {
@@ -821,10 +867,7 @@ export class QaManager {
     for (const j of jobs) void this.syncAgent(j, suite.projectName);
     // One write at a time: agents finish in any order.
     let chain: Promise<unknown> = Promise.resolve();
-    const update = (fn: (s: QASuite) => QASuite) => (chain = chain.then(async () => {
-      const cur = await this.getSuite(projectId);
-      if (cur) await this.saveSuite(fn(cur));
-    }));
+    const update = (fn: (s: QASuite) => QASuite) => (chain = chain.then(() => this.updateSuite(projectId, (cur) => (cur ? fn(cur) : null))));
 
     void (async () => {
       await this.pool(jobs, p.concurrency, async (job) => {
@@ -899,17 +942,18 @@ export class QaManager {
     const undo = { at: new Date().toISOString(), label: instruction.slice(0, 200), flows: [] as QAFlow[] };
     let chain: Promise<unknown> = Promise.resolve();
     const apply = (fixed: { flow: QAFlow; summary: string }[]) =>
-      (chain = chain.then(async () => {
-        const cur = await this.getSuite(projectId);
-        if (!cur) return;
-        for (const { flow } of fixed) {
-          const old = cur.flows.find((f) => f.id === flow.id);
-          if (old && !undo.flows.some((f) => f.id === old.id)) undo.flows.push(old);
-        }
-        const map = new Map(fixed.map((x) => [x.flow.id, { ...x.flow, repairNote: `Diperbaiki AI: ${x.summary}` }]));
-        const next = cur.flows.map((f) => map.get(f.id) ?? f);
-        await this.saveSuite({ ...cur, flows: plan ? checkFlowsAgainstPlan(next, plan) : next, undo: { ...undo, flows: [...undo.flows] } });
-      }));
+      (chain = chain.then(() =>
+        this.updateSuite(projectId, (cur) => {
+          if (!cur) return null;
+          for (const { flow } of fixed) {
+            const old = cur.flows.find((f) => f.id === flow.id);
+            if (old && !undo.flows.some((f) => f.id === old.id)) undo.flows.push(old);
+          }
+          const map = new Map(fixed.map((x) => [x.flow.id, { ...x.flow, repairNote: `Diperbaiki AI: ${x.summary}` }]));
+          const next = cur.flows.map((f) => map.get(f.id) ?? f);
+          return { ...cur, flows: plan ? checkFlowsAgainstPlan(next, plan) : next, undo: { ...undo, flows: [...undo.flows] } };
+        }),
+      ));
 
     void (async () => {
       await this.pool(jobs, p.concurrency, async (job) => {
@@ -975,15 +1019,13 @@ export class QaManager {
 
   // Runs -----------------------------------------------------------------------------------
 
-  private runDir = (projectId: string) => join(this.dir, 'runs', this.projectId(projectId));
-
   async startRun(req: QARunRequest): Promise<QARun> {
     const projectId = this.projectId(req.projectId);
     const active = [...this.runs.values()].find((r) => r.run.projectId === projectId && r.run.status === 'running');
     if (active) throw new QaInputError('Masih ada run E2E yang berjalan untuk TAD ini.');
     const suite = await this.getSuite(projectId);
     if (!suite) throw new QaInputError('Belum ada skenario E2E untuk TAD ini.');
-    const env = (await this.read<QAEnvironment[]>(this.envFile()))?.find((e) => e.id === req.environmentId);
+    const env = (await this.store.listEnvironments()).find((e) => e.id === req.environmentId);
     if (!env) throw new QaInputError('Environment tidak ditemukan.');
     const flows: QAFlow[] = req.flowIds?.length ? suite.flows.filter((f) => req.flowIds!.includes(f.id)) : suite.flows.filter((f) => f.enabled);
     if (!flows.length) throw new QaInputError('Tidak ada flow yang dipilih.');
@@ -1031,11 +1073,10 @@ export class QaManager {
         });
         run.summary = summarize(run.flows);
       }
-      // Persist first, then flip the live status: a reader that sees "done" can rely on the file.
+      // Persist first, then flip the live status: a reader that sees "done" can rely on the store.
       const finished: QARun = { ...run, status: state.cancelled ? 'cancelled' : 'done', finishedAt: new Date().toISOString(), summary: summarize(run.flows) };
-      await this.write(join(this.runDir(projectId), `${run.id}.json`), finished);
+      await this.store.saveRun(finished, await this.actor());
       Object.assign(run, finished);
-      await this.pruneRuns(projectId);
     })().catch(() => {
       run.status = 'done';
       run.finishedAt = new Date().toISOString();
@@ -1043,21 +1084,15 @@ export class QaManager {
     return run;
   }
 
-  private async pruneRuns(projectId: string) {
-    const names = (await readdir(this.runDir(projectId)).catch(() => [] as string[])).filter((n) => n.endsWith('.json')).sort();
-    for (const n of names.slice(0, Math.max(0, names.length - KEEP_RUNS))) await rm(join(this.runDir(projectId), n), { force: true });
-  }
-
   async getRun(projectId: string, id: string): Promise<QARun | undefined> {
     const live = this.runs.get(id)?.run;
     if (live && live.projectId === projectId) return live;
     if (!ID.test(id)) return undefined;
-    return this.read<QARun>(join(this.runDir(projectId), `${id}.json`));
+    return this.store.getRun(this.projectId(projectId), id);
   }
 
   async listRuns(projectId: string): Promise<QARun[]> {
-    const names = (await readdir(this.runDir(projectId)).catch(() => [] as string[])).filter((n) => n.endsWith('.json')).sort().reverse();
-    const stored = (await Promise.all(names.map((n) => this.read<QARun>(join(this.runDir(projectId), n))))).filter((r): r is QARun => Boolean(r));
+    const stored = await this.store.listRuns(this.projectId(projectId));
     const live = [...this.runs.values()].map((r) => r.run).filter((r) => r.projectId === projectId && r.status === 'running');
     return [...live, ...stored.filter((r) => !live.some((l) => l.id === r.id))];
   }
@@ -1066,5 +1101,30 @@ export class QaManager {
     const state = this.runs.get(id);
     if (state && state.run.status === 'running') state.cancelled = true;
     return state?.run;
+  }
+
+  // Projects (what QA Cockpit lists) -------------------------------------------------------
+
+  listProjects(): Promise<QAProject[]> {
+    return this.store.listProjects();
+  }
+
+  /** Tech Lead Cockpit keeps a project's name and TADs current in the store. */
+  async upsertProject(raw: { id?: unknown; name?: unknown; tads?: unknown }): Promise<QAProject> {
+    const id = this.projectId(raw.id);
+    const name = String(raw.name ?? '').trim().slice(0, 300);
+    if (!name) throw new QaInputError('Nama proyek wajib diisi.');
+    const text = (v: unknown, max: number) => (typeof v === 'string' && v.trim() ? v.trim().slice(0, max) : undefined);
+    const tads: QATadRef[] = (Array.isArray(raw.tads) ? raw.tads.slice(0, 50) : []).map((t: Record<string, unknown>) => ({
+      title: text(t?.title, 300) ?? 'TAD',
+      ...(text(t?.draftId, 64) ? { draftId: text(t?.draftId, 64) } : {}),
+      ...(text(t?.confluencePageId, 40) ? { confluencePageId: text(t?.confluencePageId, 40) } : {}),
+      ...(text(t?.confluenceUrl, 1000) && /^https?:\/\//i.test(String(t?.confluenceUrl)) ? { confluenceUrl: text(t?.confluenceUrl, 1000) } : {}),
+      ...(Array.isArray(t?.jiraKeys) ? { jiraKeys: (t.jiraKeys as unknown[]).map(String).filter((k) => /^[A-Z][A-Z0-9]+-\d+$/.test(k)).slice(0, 200) } : {}),
+    }));
+    // Unchanged: no write (opening a project calls this every time).
+    const current = (await this.store.listProjects()).find((p) => p.id === id);
+    if (current && current.name === name && JSON.stringify(current.tads) === JSON.stringify(tads)) return current;
+    return this.store.upsertProject({ id, name, tads }, await this.actor());
   }
 }

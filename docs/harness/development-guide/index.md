@@ -130,6 +130,7 @@ export interface MyFeatureDeps {
   fetchData?: typeof fetch;
 }
 ```
+Untuk kode yang memakai PostgreSQL, suntikkan pool (`PgPoolLike`) dan uji dengan **pg-mem** (devDependency), seperti `connector/qa/store.test.ts`. Jangan pernah menguji ke server bersama.
 
 ---
 

@@ -4,6 +4,7 @@
   import { confirmDialog } from '../components/confirm.svelte';
   import { toasts } from '../components/toast.svelte';
   import { qa } from '../lib/qa/client';
+  import { handleConflict } from '../lib/qa/conflict';
   import { matchDatabases, matchScore } from '../lib/qa/db-match';
   import { emptyEnvironment, type QAEnvironment } from '../lib/qa/types';
 
@@ -180,7 +181,8 @@
       serverPassword = '';
       if (keepOpen) {
         const fresh = environments.find((e) => e.id === saved);
-        if (fresh && editing) Object.assign(editing, { id: fresh.id, hasSecret: fresh.hasSecret, dbServerPassword: fresh.dbServerPassword, dbPasswords: fresh.dbPasswords });
+        // The new version too: the next save from this form must not look like a stale one.
+        if (fresh && editing) Object.assign(editing, { id: fresh.id, version: fresh.version, hasSecret: fresh.hasSecret, dbServerPassword: fresh.dbServerPassword, dbPasswords: fresh.dbPasswords });
       } else {
         editing = null;
         toasts.show('Environment tersimpan.', 'ok', 2000);
@@ -188,6 +190,11 @@
       return true;
     } catch (e) {
       error = (e as Error).message;
+      // Someone else saved this environment: the form closes on the latest list (secrets untouched).
+      await handleConflict(e, async () => {
+        environments = await qa.environments();
+        editing = null;
+      });
       return false;
     } finally {
       saving = false;

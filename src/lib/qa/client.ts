@@ -1,8 +1,19 @@
 import { api, connectorDownMessage } from '../api-base';
 import type { AiSelection } from '../ai/types';
-import type { QAAgentJob, QAEnvironment, QAGenerateJob, QAGenerateRequest, QAPipeline, QAPlan, QARun, QARunRequest, QASuite } from './types';
+import type { AppSettings } from '../settings/types';
+import type { QAAgentJob, QAEnvironment, QAGenerateJob, QAGenerateRequest, QAPipeline, QAPlan, QAProject, QARun, QARunRequest, QAStoreMigration, QAStoreStatus, QASuite, QATadRef } from './types';
 
 const HEADERS = { 'Content-Type': 'application/json', 'X-TLC-Client': '1' };
+
+/** An error from the E2E API; `code` 'conflict' = someone else saved first (see conflict.ts). */
+export class QaApiError extends Error {
+  constructor(
+    message: string,
+    readonly code?: string,
+  ) {
+    super(message);
+  }
+}
 
 async function call<T>(path: string, init: RequestInit = {}): Promise<T> {
   let res: Response;
@@ -12,7 +23,10 @@ async function call<T>(path: string, init: RequestInit = {}): Promise<T> {
     throw new Error(connectorDownMessage());
   }
   const body = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
-  if (!res.ok) throw new Error((body as { error?: string }).error ?? `HTTP ${res.status}`);
+  if (!res.ok) {
+    const err = body as { error?: string; code?: string };
+    throw new QaApiError(err.error ?? `HTTP ${res.status}`, err.code);
+  }
   return body as T;
 }
 
@@ -20,6 +34,15 @@ const post = <T>(path: string, body: unknown) => call<T>(path, { method: 'POST',
 const q = (params: Record<string, string>) => `?${new URLSearchParams(params)}`;
 
 export const qa = {
+  /** Where E2E data is kept (files or the shared database). */
+  store: () => call<QAStoreStatus>('/store'),
+  /** Logs in to the shared database with these (maybe unsaved) settings; '' password = the stored one. */
+  testStore: (settings: AppSettings['qaStore'], password?: string) => post<{ server: string; schemaVersion: number }>('/store/test', { settings, password }),
+  /** Backs up the local files, then copies them into the shared database (never overwrites). */
+  migrateStore: () => post<QAStoreMigration>('/store/migrate', {}),
+  projects: () => call<QAProject[]>('/projects'),
+  /** Keeps the project's name and TADs current for QA Cockpit. */
+  upsertProject: (project: { id: string; name: string; tads: QATadRef[] }) => post<{ project: QAProject }>('/projects', { project }).then((r) => r.project),
   environments: () => call<QAEnvironment[]>('/environments'),
   /** `secret`: undefined keeps the stored token, '' removes it. `secretVariables`: undefined keeps them. */
   saveEnvironment: (environment: QAEnvironment, secret?: string, secretVariables?: Record<string, string>, dbPasswords?: Record<string, string>, dbServerPassword?: string) =>

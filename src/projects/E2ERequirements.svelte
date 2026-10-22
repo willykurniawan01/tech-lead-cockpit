@@ -2,6 +2,7 @@
   import Icon from '../components/Icon.svelte';
   import { toasts } from '../components/toast.svelte';
   import { qa } from '../lib/qa/client';
+  import { handleConflict } from '../lib/qa/conflict';
   import { e2eRequirements } from '../lib/qa/requirements';
   import type { QAEnvironment, QAFlow } from '../lib/qa/types';
 
@@ -55,7 +56,7 @@
       urls = {};
       toasts.show(`Tersimpan ke environment ${env.name}.`, 'ok', 2000);
     } catch (e) {
-      toasts.show((e as Error).message, 'err');
+      if (!(await handleConflict(e, async () => (environments = await qa.environments())))) toasts.show((e as Error).message, 'err');
     } finally {
       saving = false;
     }

@@ -248,7 +248,9 @@ describe('QaManager databases', () => {
   it('reads only the schemas of the selected tasks\' services when generating', async () => {
     const m = manager();
     const [saved] = await m.saveEnvironment(base, undefined, undefined, undefined, 's3cret');
-    await m.generate({ projectId: 'proj', projectName: 'P', ai: { provider: 'claude', model: '' }, tasks: [{ title: 't', service: 'CORE-PROMO-ULTIMATE', spec: 's' }], categories: ['happy-path'], environmentId: saved.id });
+    const job = await m.generate({ projectId: 'proj', projectName: 'P', ai: { provider: 'claude', model: '' }, tasks: [{ title: 't', service: 'CORE-PROMO-ULTIMATE', spec: 's' }], categories: ['happy-path'], environmentId: saved.id });
+    // The job saves the suite in the background: let it finish before the folder is removed.
+    for (let i = 0; i < 500 && m.getJob(job.id)?.status === 'running'; i++) await new Promise((r) => setTimeout(r, 10));
     expect(prompt).toContain('promo_db: tables(id) [pw:yes]');
     expect(prompt).not.toContain('user_auth: tables');
     expect(prompt).not.toContain('s3cret');

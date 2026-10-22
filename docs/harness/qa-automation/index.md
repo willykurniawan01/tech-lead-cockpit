@@ -51,12 +51,17 @@ sequenceDiagram
 | [`src/lib/qa/tad-findings.ts`](../../../src/lib/qa/tad-findings.ts) | Temuan untuk TAD | `collectFindings`: temuan E2E yang mungkin kelewat di TAD (catatan AI, test diperbaiki agent repair, pertanyaan coder agent, endpoint di luar rencana, test diubah lewat Perbaiki dengan AI, dugaan bug, test gagal); `likelyTad` memilih TAD tujuan; `buildTadUpdatePrompt` menyusun instruksi revisi. Test di [`tad-findings.test.ts`](../../../src/lib/qa/tad-findings.test.ts). |
 | [`src/lib/qa/code-fix.ts`](../../../src/lib/qa/code-fix.ts) | Perbaiki Kode dari Test Gagal | `buildCodeFixSpec`: spesifikasi coder run bugfix dari flow yang gagal (step yang gagal, request/response tanpa header, assertion gagal, definisi test, Detail Task TAD, catatan); `failingService` untuk default repo; `e2eDraftId` = `e2e-<projectId>`. Test di [`code-fix.test.ts`](../../../src/lib/qa/code-fix.test.ts). |
 | [`src/lib/qa/latest.ts`](../../../src/lib/qa/latest.ts) | Hasil Terakhir per Flow | `latestResults`: hasil final (lulus/gagal/error/diblokir) tiap flow dari run terbaru yang benar-benar menjalankannya di environment terpilih; `resultBucket`/`resultCounts` untuk filter dan hitungan. Test di [`latest.test.ts`](../../../src/lib/qa/latest.test.ts). |
+| [`src/lib/qa/conflict.ts`](../../../src/lib/qa/conflict.ts) | Konflik Simpan | `handleConflict`: bila simpan ditolak karena versi lama (HTTP 409 `conflict`), tampilkan siapa yang menyimpan duluan dan tawarkan **Muat ulang**. Dipakai di E2EPanel (suite), E2EPipeline (rencana), E2EEnvironmentModal dan E2ERequirements (environment). |
 | [`src/lib/qa/groups.ts`](../../../src/lib/qa/groups.ts) | Grup Test Case | Fungsi murni untuk grup di tab Skenario: urutan grup, tampilan per grup, status centang grup, tambah/ganti nama/hapus/urutkan grup, pindah flow antar grup dan di dalam grup. Dipakai UI dan connector. Test di [`groups.test.ts`](../../../src/lib/qa/groups.test.ts). |
 
 ### Backend Connector (`connector/qa/`)
 | File Path | Komponen | Deskripsi & Tanggung Jawab |
 |---|---|---|
-| [`connector/qa/manager.ts`](file:///Users/ridwan/mine/tech-lead-cockpit/connector/qa/manager.ts) | QA Suite Manager | Mengelola persistensi test suite, riwayat hasil pengujian, dan manajemen konfigurasi kredensial environment. |
+| [`connector/qa/manager.ts`](file:///Users/ridwan/mine/tech-lead-cockpit/connector/qa/manager.ts) | QA Suite Manager | Logika suite, run, pipeline agent, dan environment (rahasia ke Keychain). Data disimpan lewat `QaStore` (`deps.store`, default file), `updated_by` dari `deps.actor`. Agent latar belakang menyimpan lewat `updateSuite` (baca ulang dan coba lagi maks. 3x bila konflik). |
+| [`connector/qa/store.ts`](../../../connector/qa/store.ts) | Kontrak Store + File | Interface `QaStore`, `QaConflictError`, `KEEP_RUNS` (50), dan `FileQaStore` (layout file lama + kolom `version`, tulis atomik). |
+| [`connector/qa/pg-store.ts`](../../../connector/qa/pg-store.ts) | Store PostgreSQL | `PgQaStore` (pool `pg`, maks. 4 koneksi), `MIGRATIONS` berversi di tabel `schema_version` (di bawah `pg_advisory_xact_lock`), `probe()` untuk Tes koneksi, pesan error koneksi yang bisa ditindaklanjuti (`QaStoreError`). |
+| [`connector/qa/store-config.ts`](../../../connector/qa/store-config.ts) | Pemilih Store | `QaStoreSwitch` mengikuti Pengaturan: file, atau satu pool per koneksi/password. DB pusat yang dipilih tapi tidak lengkap memberi error di setiap panggilan, **tidak** jatuh diam-diam ke file. |
+| [`connector/qa/store-migrate.ts`](../../../connector/qa/store-migrate.ts) | Pindah ke DB Pusat | `moveToCentral`: backup folder `qa` ke `~/.tech-lead-cockpit/qa-backups/<ts>-before-central`, lalu salin proyek, suite, rencana, environment, dan run. Tidak menimpa, file lokal tetap ada, aman diulang. |
 | [`connector/qa/generator.ts`](file:///Users/ridwan/mine/tech-lead-cockpit/connector/qa/generator.ts) | AI Skenario Generator | Menganalisis dokumen arsitektur teknis untuk menghasilkan skenario pengujian realistis dengan validasi boundary & edge cases. |
 | [`connector/qa/runner.ts`](file:///Users/ridwan/mine/tech-lead-cockpit/connector/qa/runner.ts) | Test Execution Engine | Mesin eksekutor HTTP requests, penegasan kondisi (*assertions*), logging error, dan penanganan timeout. |
 
@@ -205,12 +210,43 @@ Built-in (`QA_BUILTIN_VARS`) tidak pernah dihitung. Panel juga menandai service 
 
 ---
 
+## 🗄️ Penyimpanan E2E: file lokal atau DB pusat (PostgreSQL)
+
+Data E2E (proyek, suite beserta grup, rencana journey, riwayat run, dan environment) disimpan lewat `QaStore`. Pilihannya ada di **Koneksi → Penyimpanan E2E** (`settings.qaStore`):
+
+| Mode | Lokasi | Untuk |
+|---|---|---|
+| `file` (default) | `~/.tech-lead-cockpit/qa/`: `suites/<projectId>.json`, `plans/<projectId>.json`, `runs/<projectId>/<runId>.json`, `environments.json`, `projects.json` | Satu orang di satu laptop |
+| `postgres` | Database bersama (mis. `tlc_qa` di server PostgreSQL dev) | Tech Lead Cockpit dan QA Cockpit memakai data yang sama |
+
+- **Tabel** (dibuat dan di-upgrade oleh app, `MIGRATIONS` di `pg-store.ts`, tercatat di `schema_version`): `qa_projects` (id, name, `tads` jsonb: judul, draftId, Confluence page id/url, Jira keys), `qa_suites`/`qa_plans`/`qa_environments` (`data` jsonb, `version`, `updated_at`, `updated_by`), `qa_runs` (id, project_id, started_at, status, environment_id, summary, data). Migrasi baru = tambah entri ke `MIGRATIONS`, jangan ubah yang sudah ada. App yang lebih lama dari skema menolak jalan ("Perbarui app dulu").
+- **Tanpa rahasia.** Token, password DB, dan variabel rahasia environment tetap di Keychain tiap user dengan kunci `env:<id>` yang sama, jadi environment bersama dipakai dengan kredensial masing-masing. `storableEnvironment` membuang field status Keychain sebelum disimpan.
+- **Konflik simpan (optimistic concurrency).** Suite, rencana, dan environment membawa `version`. Simpan hanya berhasil bila versinya masih sama (`UPDATE … WHERE version = $expected`, buat baru = `version` 0). Bila tidak, connector membalas **409** `{ code: 'conflict', updatedBy, updatedAt }` dengan pesan "… sudah diubah oleh X pada Y. Perubahan Anda belum disimpan", lalu UI menawarkan **Muat ulang** (`handleConflict`). Tidak pernah menimpa diam-diam. Hasil generate dan rencana baru dari agent disimpan di atas versi saat job dimulai. Agent penulis, repair, dan perbaikan membaca ulang lalu menerapkan perubahannya lagi (`updateSuite`).
+- **Siapa yang menyimpan.** `updated_by` = email atau nama di Pengaturan (`settings.identity`), bila kosong email git global, lalu user macOS. Nilai ini diisi sendiri oleh user (satu login DB bersama), jadi bukan bukti identitas.
+- **Run.** Run selesai di-insert sekali (tidak berubah lagi), 50 run terbaru per proyek disimpan. Run yang sedang berjalan tetap hanya di memori proses yang menjalankannya.
+- **Proyek untuk QA.** Panel E2E di Cockpit TL memanggil `POST /qa/projects` saat proyek dibuka: nama dan referensi TAD (tanpa isi draft). Penulisan hanya terjadi bila ada yang berubah. `saveSuite` di PostgreSQL juga membuat baris proyek bila belum ada.
+- **Pindahkan data lokal ke DB pusat** (tombol di kartu Penyimpanan E2E, dengan konfirmasi): backup dulu, salin semua, lewati dan laporkan item yang sudah ada di DB dengan isi berbeda, catat audit `qa.store.migrate`.
+- **Suite per-TAD lama** (`adoptLegacy`) hanya diadopsi di mode file.
+- **Membuat database** di server bersama: [`scripts/sql/qa-central-db.sql`](../../../scripts/sql/qa-central-db.sql) (`psql -v app_user=<login> -f …`). Isinya hanya `CREATE DATABASE tlc_qa OWNER <login>` dan pembatasan CONNECT. Dijalankan admin, sekali, setelah disetujui.
+
+| Endpoint | Fungsi |
+|---|---|
+| `GET /qa/store` | Mode aktif dan target (`host:port/db`) |
+| `POST /qa/store/test` | Login dengan isian form (belum disimpan) atau yang tersimpan: versi server dan versi skema, tanpa membuat tabel |
+| `POST /qa/store/migrate` | Backup lalu salin data lokal ke DB pusat (audit) |
+| `GET /qa/projects`, `POST /qa/projects` | Daftar proyek; upsert nama dan TAD |
+
+---
+
 ## 🛠️ Panduan Development & Debugging
 
 ### Menjalankan Unit Test QA Engine
 ```bash
 npm test connector/qa/qa.test.ts
+npm test connector/qa/store.test.ts   # kontrak store file + PostgreSQL (pg-mem), konflik, migrasi data
 ```
+
+Test PostgreSQL memakai **pg-mem** (in-memory). Di sana `pg_advisory_xact_lock` didaftarkan sebagai fungsi kosong, dan `noAstCoverageCheck` dinyalakan (pg-mem tidak membaca `CREATE TABLE IF NOT EXISTS` pada tabel yang sudah ada). Perilaku `INSERT … ON CONFLICT DO NOTHING RETURNING` di pg-mem berbeda dari PostgreSQL, jadi pembuatan baris memakai INSERT biasa dan menangkap `23505`.
 
 > [!NOTE]
 > Setelah melakukan perubahan pada modul QA Automation, pastikan Anda memperbarui dokumen ini jika terdapat modifikasi struktur schema skenario test atau runner API!

@@ -110,8 +110,16 @@ graph TD
   - `tech-lead-cockpit.gitlab`
   - `tech-lead-cockpit.inferhub`
   - `tech-lead-cockpit.9router`
+  - `tech-lead-cockpit.qa-store` (password DB pusat E2E)
+  - `tech-lead-cockpit.qa` (token dan password environment E2E, akun `env:<id>…`)
 - **Frontend tidak pernah menerima token mentah!** Frontend hanya menerima status boolean `{ configured: true, user: "..." }`.
 - Setiap kali Connector memerlukan token untuk memanggil API Jira/GitLab/Confluence, Connector membacanya langsung dari Keychain sesaat sebelum request HTTP dibuat (`readKeychain`).
+
+### 4. Data E2E: lokal atau DB pusat bersama
+- Semua data lain tetap di `~/.tech-lead-cockpit`. Data E2E bisa dipindah ke database PostgreSQL bersama (Pengaturan → Penyimpanan E2E), dipakai juga oleh app **QA Cockpit** (repo terpisah, data dir `~/.qa-cockpit`).
+- Connector mengakses DB pusat langsung lewat `pg` (VPN). Isinya tanpa rahasia: kredensial environment tetap di Keychain tiap user.
+- Simpan bersamaan dijaga dengan kolom `version` (HTTP 409 + Muat ulang). Skema di-upgrade oleh app (`schema_version`).
+- Backup sebelum pindah ada di `~/.tech-lead-cockpit/qa-backups/`. Detail di [QA Automation](../qa-automation/index.md#️-penyimpanan-e2e-file-lokal-atau-db-pusat-postgresql).
 
 ---
 

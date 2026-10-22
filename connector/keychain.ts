@@ -10,6 +10,8 @@ export const TEAMS_SERVICE = `${KEYCHAIN_PREFIX}.teams`;
 export const GITLAB_SERVICE = `${KEYCHAIN_PREFIX}.gitlab`;
 export const NINEROUTER_SERVICE = `${KEYCHAIN_PREFIX}.9router`;
 export const FIGMA_SERVICE = `${KEYCHAIN_PREFIX}.figma`;
+/** Password of the shared E2E database (Settings → Penyimpanan E2E). */
+export const QA_STORE_SERVICE = `${KEYCHAIN_PREFIX}.qa-store`;
 
 /**
  * Reads a secret from the macOS login Keychain. Read on every call (no caching) so a

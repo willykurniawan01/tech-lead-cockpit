@@ -37,6 +37,12 @@ import { repoProjectPaths } from './releases/repos.ts';
 import type { ReleaseAiJob } from '../src/lib/release/types.ts';
 import { PdfPasswordError } from './pdf-unlock.ts';
 import { QA_KEYCHAIN_SERVICE, QaInputError, QaManager } from './qa/manager.ts';
+import { FileQaStore, QaConflictError } from './qa/store.ts';
+import { createPgPool, PgQaStore, QaStoreError } from './qa/pg-store.ts';
+import { connectionOf, QaStoreSwitch } from './qa/store-config.ts';
+import { moveToCentral } from './qa/store-migrate.ts';
+import { DATA_DIR } from './paths.ts';
+import { userInfo } from 'node:os';
 import { MAX_QA_TASKS, normalizeEditedFlow } from './qa/generator.ts';
 import { checkFlowsAgainstPlan } from './qa/plan.ts';
 import { ReportInputError, ReportVps, type ReportSettings } from './report/vps.ts';
@@ -61,7 +67,7 @@ import { isValidDraftId } from './generator-runner.ts';
 import { DraftFileError, DraftFiles } from './drafts-store.ts';
 import { renderCockpitContext, type CockpitState, type DraftForContext } from './cockpit-context.ts';
 import { ConversationError, ConversationFiles } from './conversations-store.ts';
-import { CONFLUENCE_SERVICE, FIGMA_SERVICE, JIRA_SERVICE, GITLAB_SERVICE, deleteKeychain, readKeychain, writeKeychain } from './keychain.ts';
+import { CONFLUENCE_SERVICE, FIGMA_SERVICE, JIRA_SERVICE, GITLAB_SERVICE, QA_STORE_SERVICE, deleteKeychain, readKeychain, writeKeychain } from './keychain.ts';
 import { transitionWithChecks, type TransitionRequest } from './jira-transition.ts';
 import { TadTicketError, createTadTickets, ticketTemplate, validateTicketRequest } from './tad-tickets.ts';
 import { GitLabClient, GitLabError, normalizeBaseUrl, parseMrUrl } from './gitlab.ts';
@@ -334,7 +340,11 @@ export function connectorMiddleware(env: Env, deps: ConnectorDeps) {
       if (url.pathname === `${PREFIX}/settings` || url.pathname.startsWith(`${PREFIX}/settings/`)) return await handleSettings(route, req, res, env);
       if (url.pathname.startsWith(`${PREFIX}/estimate/`)) return await handleEstimate(route, url, req, res, (deps.estimate ?? estimateManager)());
       if (url.pathname.startsWith(`${PREFIX}/report/`)) return await handleReport(route, req, res, (deps.report ?? (() => (reportVps ??= new ReportVps())))(), deps.appendAudit);
-      if (url.pathname.startsWith(`${PREFIX}/qa/`)) return await handleQa(route, url, req, res, (deps.qa ?? qaManager)(), deps.appendAudit);
+      if (url.pathname.startsWith(`${PREFIX}/qa/`)) {
+        // The store chosen in Settings is set up before the first E2E call (tests inject their manager).
+        if (!deps.qa) await (qaStoreSynced ??= syncQaStore());
+        return await handleQa(route, url, req, res, (deps.qa ?? qaManager)(), deps.appendAudit);
+      }
       if (route.endsWith(' /drafts') || url.pathname.startsWith(`${PREFIX}/drafts/`)) return await handleDrafts(route, req, res);
       if (url.pathname.startsWith(`${PREFIX}/assistant/conversations`)) return await handleConversations(route, url, req, res);
       if (url.pathname.startsWith(`${PREFIX}/gitlab/`)) return await handleGitLab(route, url, req, res, env);
@@ -983,6 +993,25 @@ async function handleDrafts(route: string, req: IncomingMessage, res: ServerResp
   return fail(res, 404, { error: `Route tidak dikenal: ${route}`, code: 'not-found' });
 }
 
+/** E2E store from Settings → Penyimpanan E2E: files, or the shared PostgreSQL database. */
+const qaStores = new QaStoreSwitch({ readPassword: () => readKeychain(QA_STORE_SERVICE) });
+let qaStoreSynced: Promise<void> | undefined;
+function syncQaStore(): Promise<void> {
+  return settingsStore
+    .load()
+    .then(({ settings }) => qaStores.apply(settings.qaStore))
+    .catch(() => {});
+}
+
+let gitEmail: Promise<string> | undefined;
+/** Who saves (updated_by): the name/email from Settings, else git's email, else the macOS user. */
+async function qaActor(): Promise<string | undefined> {
+  const id = (await settingsStore.load().catch(() => undefined))?.settings.identity;
+  if (id?.email || id?.name) return id.email || id.name;
+  gitEmail ??= new Promise((resolve) => execFile('git', ['config', '--global', 'user.email'], { timeout: 3_000 }, (err, out) => resolve(err ? '' : String(out).trim())));
+  return (await gitEmail) || userInfo().username;
+}
+
 const qaGlobal = globalThis as typeof globalThis & { __tlcQa?: QaManager; __tlcQaModule?: symbol };
 const QA_MODULE = Symbol('qa-module');
 
@@ -1009,6 +1038,8 @@ function qaManager(): QaManager {
   if (existing && qaGlobal.__tlcQaModule !== QA_MODULE && !(typeof existing.isBusy === 'function' && existing.isBusy())) qaGlobal.__tlcQa = undefined;
   if (!qaGlobal.__tlcQa) qaGlobal.__tlcQaModule = QA_MODULE;
   qaGlobal.__tlcQa ??= new QaManager({
+    store: () => qaStores.current(),
+    actor: qaActor,
     readSecret: (key) => readKeychain(QA_KEYCHAIN_SERVICE, `env:${key}`),
     writeSecret: (key, value) => writeKeychain(QA_KEYCHAIN_SERVICE, value, `env:${key}`),
     deleteSecret: (key) => deleteKeychain(QA_KEYCHAIN_SERVICE, `env:${key}`),
@@ -1046,6 +1077,42 @@ function qaManager(): QaManager {
 
 async function handleQa(route: string, url: URL, req: IncomingMessage, res: ServerResponse, qa: QaManager, audit: ConnectorDeps['appendAudit']) {
   try {
+    if (route === 'GET /qa/store') return send(res, 200, { ...qaStores.status(), mode: qa.store.kind });
+    if (route === 'POST /qa/store/test') {
+      // The form's values (maybe unsaved); an empty password uses the one in the Keychain.
+      const body = await readJson<{ settings?: Partial<AppSettings['qaStore']>; password?: string }>(req, 16 * 1024);
+      const saved = (await settingsStore.load()).settings.qaStore;
+      const cfg = { ...saved, ...(body.settings ?? {}), port: Number(body.settings?.port ?? saved.port) || 5432 };
+      if (!cfg.host || !cfg.user || !cfg.database) throw new QaInputError('Isi host, database, dan user DB pusat dulu.');
+      const conn = connectionOf(cfg);
+      const password = (typeof body.password === 'string' && body.password) || ((await readKeychain(QA_STORE_SERVICE)) ?? undefined);
+      const probe = new PgQaStore(createPgPool(conn, password), conn);
+      try {
+        return send(res, 200, await probe.probe());
+      } finally {
+        await probe.close();
+      }
+    }
+    if (route === 'POST /qa/store/migrate') {
+      const target = qa.store;
+      if (target.kind !== 'postgres') throw new QaInputError('Pilih dan simpan DB pusat di Pengaturan → Penyimpanan E2E dulu.');
+      const by = await qaActor();
+      const result = await moveToCentral(new FileQaStore(path.join(DATA_DIR, 'qa')), target, { backupRoot: path.join(DATA_DIR, 'qa-backups'), by });
+      await audit({
+        ts: new Date().toISOString(),
+        action: 'qa.store.migrate',
+        result: 'success',
+        spaceKey: qaStores.status().target ?? 'postgres',
+        title: `${result.suites} suite, ${result.plans} rencana, ${result.environments} environment, ${result.runs} run${result.skipped.length ? `, ${result.skipped.length} dilewati` : ''}`.slice(0, 300),
+        attachments: 0,
+      }).catch(() => {});
+      return send(res, 200, result);
+    }
+    if (route === 'GET /qa/projects') return send(res, 200, await qa.listProjects());
+    if (route === 'POST /qa/projects') {
+      const body = await readJson<{ project?: { id?: unknown; name?: unknown; tads?: unknown } }>(req, 256 * 1024);
+      return send(res, 200, { project: await qa.upsertProject(body.project ?? {}) });
+    }
     if (route === 'GET /qa/environments') return send(res, 200, await qa.listEnvironments());
     if (route === 'POST /qa/environments') {
       const body = await readJson<{ environment: Partial<QAEnvironment>; secret?: string; secretVariables?: Record<string, string>; dbPasswords?: Record<string, string>; dbServerPassword?: string }>(req, 512 * 1024);
@@ -1088,7 +1155,7 @@ async function handleQa(route: string, url: URL, req: IncomingMessage, res: Serv
       const suspects = Array.isArray(suite.suspects) ? suite.suspects.slice(0, 50) : undefined;
       // Groups: cleaned names, and flows stored in the order they are shown and run.
       const grouped = withGroups({ ...suite, flows, groups: normalizeGroups(suite.groups) });
-      return send(res, 200, { suite: await qa.saveSuite({ ...grouped, suspects, flows: plan ? checkFlowsAgainstPlan(grouped.flows, plan) : grouped.flows, projectName: String(suite.projectName ?? '').slice(0, 300) }) });
+      return send(res, 200, { suite: await qa.saveSuite({ ...grouped, suspects, flows: plan ? checkFlowsAgainstPlan(grouped.flows, plan) : grouped.flows, projectName: String(suite.projectName ?? '').slice(0, 300), version: Number.isInteger(suite.version) ? suite.version : undefined }) });
     }
     if (route === 'POST /qa/generate') {
       const body = await readJson<QAGenerateRequest>(req, 4 * 1024 * 1024);
@@ -1177,6 +1244,9 @@ async function handleQa(route: string, url: URL, req: IncomingMessage, res: Serv
     return fail(res, 404, { error: `Route tidak dikenal: ${route}`, code: 'not-found' });
   } catch (e) {
     if (e instanceof QaInputError) throw new ConfluenceError(e.message, 400, 'bad-request');
+    // Someone saved first: the page offers to reload instead of overwriting.
+    if (e instanceof QaConflictError) return fail(res, 409, { error: e.message, code: 'conflict', updatedBy: e.updatedBy, updatedAt: e.updatedAt });
+    if (e instanceof QaStoreError) return fail(res, 503, { error: e.message, code: 'store-unavailable' });
     throw e;
   }
 }
@@ -1536,6 +1606,7 @@ async function handleSettings(route: string, req: IncomingMessage, res: ServerRe
       const body = await readJson<{ settings?: Partial<AppSettings> }>(req, 256 * 1024);
       const next = await settingsStore.update(body.settings ?? {}, env);
       applySettingsToEnv(next, env, process.env);
+      qaStoreSynced = qaStores.apply(next.qaStore);
       return send(res, 200, await settingsResponse(env));
     }
     if (route === 'POST /settings/secret') {
@@ -1551,6 +1622,7 @@ async function handleSettings(route: string, req: IncomingMessage, res: ServerRe
       // A key in .env.local would win over the Keychain for these providers: drop it from this process.
       if (id === 'inferhub') delete env.INFERHUB_API_KEY;
       if (id === 'ninerouter') delete env.NINEROUTER_API_KEY;
+      if (id === 'qastore') qaStoreSynced = syncQaStore();
       return send(res, 200, await settingsResponse(env));
     }
     return fail(res, 404, { error: `Route tidak dikenal: ${route}`, code: 'not-found' });

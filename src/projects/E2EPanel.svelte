@@ -7,6 +7,7 @@
   import { loadAiSelection } from '../lib/ai/providers.svelte';
   import type { AiSelection } from '../lib/ai/types';
   import { qa, runReport } from '../lib/qa/client';
+  import { handleConflict } from '../lib/qa/conflict';
   import Modal from '../components/Modal.svelte';
   import AgentRunsPanel from '../coder/AgentRunsPanel.svelte';
   import { coder, suggestRepo } from '../lib/coder/client';
@@ -23,7 +24,7 @@
   import { dbFillPlan, notReady } from '../lib/qa/db-fill';
   import { latestResults, resultBucket, resultCounts, type LatestResult, type ResultBucket } from '../lib/qa/latest';
   import { addGroup, cleanGroupName, edgeOfGroup, groupCheck, groupFlows, groupOrder, moveFlowInGroup, moveFlowToGroup, moveGroup, removeGroup, renameGroup, setGroupEnabled, UNGROUPED_LABEL, withGroups } from '../lib/qa/groups';
-  import { QA_CATEGORIES, QA_CATEGORY_LABELS, type QACategory, type QAEnvironment, type QAFlow, type QAFlowResult, type QAGenerateJob, type QAGenerateRequest, type QAPipeline, type QAPlan, type QARun, type QASuspect, type QAStepResult, type QAStepStatus, type QASuite } from '../lib/qa/types';
+  import { QA_CATEGORIES, QA_CATEGORY_LABELS, type QACategory, type QAEnvironment, type QAFlow, type QAFlowResult, type QAGenerateJob, type QAGenerateRequest, type QAPipeline, type QAPlan, type QARun, type QASuspect, type QAStepResult, type QAStepStatus, type QAStoreStatus, type QASuite, type QATadRef } from '../lib/qa/types';
   import type { EstimateProject } from '../lib/estimate/types';
   import type { Draft } from '../tad/drafts.svelte';
   import E2EEnvironmentModal from './E2EEnvironmentModal.svelte';
@@ -46,6 +47,8 @@
   const multiTad = $derived(project.draftIds.length > 1);
 
   let suite = $state<QASuite | null>(null);
+  /** Where the test cases are kept (files on this laptop, or the shared database with QA). */
+  let storeStatus = $state<QAStoreStatus | null>(null);
   let environments = $state<QAEnvironment[]>([]);
   let envId = $state(savedEnvId());
   let envModalOpen = $state(false);
@@ -488,8 +491,11 @@
     editingId = null;
     selectedTasks = new Set(tasks.filter((t) => t.spec && /\[BACKEND\]/i.test(t.title)).map((t) => t.id));
     try {
-      const [s, envs, rs, j, pl] = await Promise.all([qa.suite(id, { projectName: project.name, draftIds: [...project.draftIds] }), qa.environments(), qa.runs(id), qa.latestJob(id), qa.pipeline(id).catch(() => null)]);
+      const [s, envs, rs, j, pl, st] = await Promise.all([qa.suite(id, { projectName: project.name, draftIds: [...project.draftIds] }), qa.environments(), qa.runs(id), qa.latestJob(id), qa.pipeline(id).catch(() => null), qa.store().catch(() => null)]);
       if (project.id !== id) return;
+      storeStatus = st;
+      // QA Cockpit lists projects and reads their TADs from the store (best effort, unchanged = no write).
+      void qa.upsertProject({ id, name: project.name, tads: tadRefs() }).catch(() => {});
       plan = pl?.plan ?? null;
       pipeline = pl?.pipeline ?? null;
       suite = s;
@@ -506,6 +512,17 @@
     } catch (e) {
       toasts.show(`E2E: ${(e as Error).message}`, 'err');
     }
+  }
+
+  /** The project's TADs as QA sees them: title, Confluence page and Jira tickets (no draft content). */
+  function tadRefs(): QATadRef[] {
+    return projectDrafts(project, drafts).map((d) => ({
+      draftId: d.id,
+      title: draftTitle(d),
+      ...(d.confluence?.pageId ? { confluencePageId: d.confluence.pageId } : {}),
+      ...(d.confluence?.url ? { confluenceUrl: d.confluence.url } : {}),
+      ...(d.source?.jiraKeys?.length ? { jiraKeys: [...d.source.jiraKeys] } : {}),
+    }));
   }
 
   const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -716,6 +733,7 @@
     try {
       suite = await qa.saveSuite($state.snapshot(next) as QASuite);
     } catch (e) {
+      if (await handleConflict(e, () => load(project.id))) return;
       toasts.show(`Gagal menyimpan: ${(e as Error).message}`, 'err');
     }
   }
@@ -867,6 +885,7 @@
       editingId = null;
       toasts.show('Test case tersimpan.', 'ok', 1500);
     } catch (e) {
+      if (await handleConflict(e, () => load(project.id))) return 'Test case ini sudah diubah orang lain; muat ulang lalu ulangi perubahan Anda.';
       return (e as Error).message;
     }
   }
@@ -1060,6 +1079,12 @@
   <div class="tabs">
     <button class:active={tab === 'flows'} onclick={() => (tab = 'flows')}>Skenario ({suite?.flows.length ?? 0})</button>
     <button class:active={tab === 'results'} onclick={() => (tab = 'results')}>Hasil Run {#if runs.length}({runs.length}){/if}</button>
+    {#if storeStatus}
+      <span class="store-chip muted small" title={storeStatus.mode === 'postgres' ? `Dipakai bersama QA: ${storeStatus.target ?? ''}` : 'Hanya di laptop ini. Atur DB pusat di Koneksi → Penyimpanan E2E.'}>
+        <Icon name={storeStatus.mode === 'postgres' ? 'database' : 'save'} size={12} />
+        {storeStatus.mode === 'postgres' ? 'DB pusat' : 'Lokal'}
+      </span>
+    {/if}
   </div>
 
   <div class="body">
@@ -2194,6 +2219,13 @@
     flex-direction: column;
     gap: 4px;
     font-size: 12.5px;
+  }
+  .store-chip {
+    margin-left: auto;
+    align-self: center;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
   }
   .tabs {
     display: flex;

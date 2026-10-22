@@ -34,6 +34,7 @@
     'remote.connect': 'Remote tersambung',
     'remote.action': 'Remote aksi',
     'qa.run': 'Run E2E',
+    'qa.store.migrate': 'Pindah data E2E ke DB pusat',
     'report.install': 'Pasang laporan',
     'report.send': 'Kirim laporan',
     'bug.ticket': 'Tiket bug',

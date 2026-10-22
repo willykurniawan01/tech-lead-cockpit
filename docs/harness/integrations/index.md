@@ -86,6 +86,15 @@ Token dibuat di Figma → Settings → Security → Personal access tokens denga
 | [`connector/ninerouter.ts`](file:///Users/ridwan/mine/tech-lead-cockpit/connector/ninerouter.ts) | 9Router Driver | Integrasi ke model gateway 9Router dengan streaming protokol seragam. |
 | [`connector/keychain.ts`](file:///Users/ridwan/mine/tech-lead-cockpit/connector/keychain.ts) | macOS Keychain Adapter | Fungsi `readKeychain()`, `writeKeychain()`, dan `deleteKeychain()` yang membungkus CLI `/usr/bin/security`. |
 
+### DB Pusat E2E (PostgreSQL bersama)
+| File Path | Komponen | Deskripsi & Tanggung Jawab |
+|---|---|---|
+| [`connector/qa/pg-store.ts`](../../../connector/qa/pg-store.ts) | Store PostgreSQL | Pool `pg` ke database bersama (`settings.qaStore`: host, port, database, user, SSL). Password dibaca dari Keychain `tech-lead-cockpit.qa-store` (secret `qastore` di `POST /settings/secret`). Tabel dibuat lewat migrasi berversi. |
+| [`connector/qa/store-config.ts`](../../../connector/qa/store-config.ts) | Pemilih Store | Diterapkan ulang setelah `POST /settings` dan setelah password `qastore` berubah. |
+| [`scripts/sql/qa-central-db.sql`](../../../scripts/sql/qa-central-db.sql) | Script Admin | `CREATE DATABASE tlc_qa` untuk login yang sudah ada. Jangan dijalankan di server bersama tanpa persetujuan. |
+
+Pesan koneksi gagal dibuat bisa ditindaklanjuti: login ditolak, database belum ada (jalankan script), atau server tidak terjangkau (cek VPN).
+
 ---
 
 ## 🔑 Manajemen Token & Skrip Bantuan

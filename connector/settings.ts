@@ -2,7 +2,7 @@ import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { DEFAULT_SETTINGS, type AppSettings, type SecretId } from '../src/lib/settings/types.ts';
-import { CONFLUENCE_SERVICE, FIGMA_SERVICE, GITLAB_SERVICE, INFERHUB_SERVICE, JIRA_SERVICE, NINEROUTER_SERVICE } from './keychain.ts';
+import { CONFLUENCE_SERVICE, FIGMA_SERVICE, GITLAB_SERVICE, INFERHUB_SERVICE, JIRA_SERVICE, NINEROUTER_SERVICE, QA_STORE_SERVICE } from './keychain.ts';
 import { DATA_DIR } from './paths.ts';
 
 /**
@@ -25,6 +25,7 @@ export const SECRET_SERVICES: Record<SecretId, string> = {
   inferhub: INFERHUB_SERVICE,
   ninerouter: NINEROUTER_SERVICE,
   figma: FIGMA_SERVICE,
+  qastore: QA_STORE_SERVICE,
 };
 
 type Env = Record<string, string | undefined>;
@@ -46,6 +47,18 @@ export function validateSettings(raw: Partial<AppSettings>): AppSettings {
   if (!/^[\w./-]+$/.test(branch)) throw new SettingsInputError('Nama branch dasar tidak valid.');
   const project = text(r.jira?.defaultProject, 10).toUpperCase();
   if (project && !/^[A-Z][A-Z0-9]{1,9}$/.test(project)) throw new SettingsInputError('Project key Jira tidak valid (mis. MU).');
+  const store = r.qaStore ?? d.qaStore;
+  const storeMode = oneOf(store.mode, ['file', 'postgres'] as const, d.qaStore.mode);
+  const storeHost = text(store.host, 253);
+  if (storeHost && !/^[\w.-]+$/.test(storeHost)) throw new SettingsInputError('Host DB pusat tidak valid.');
+  const storePort = Number(store.port) || d.qaStore.port;
+  if (!Number.isInteger(storePort) || storePort < 1 || storePort > 65_535) throw new SettingsInputError('Port DB pusat tidak valid.');
+  const storeDb = text(store.database, 63) || d.qaStore.database;
+  if (!/^[\w$-]+$/.test(storeDb)) throw new SettingsInputError('Nama database pusat tidak valid.');
+  const storeUser = text(store.user, 100);
+  if (storeMode === 'postgres' && (!storeHost || !storeUser)) throw new SettingsInputError('Isi host dan user DB pusat dulu.');
+  const email = text(r.identity?.email, 200);
+  if (email && !/^[^\s@]+@[^\s@]+$/.test(email)) throw new SettingsInputError('Email tidak valid.');
   return {
     version: 1,
     general: { orgName: text(r.general?.orgName, 120), timezone: text(r.general?.timezone, 60) || d.general.timezone },
@@ -69,6 +82,8 @@ export function validateSettings(raw: Partial<AppSettings>): AppSettings {
       ninerouter: { baseUrl: url(r.ai?.ninerouter?.baseUrl, 'URL 9Router'), model: text(r.ai?.ninerouter?.model, 120) || d.ai.ninerouter.model },
     },
     teams: { tenantId: text(r.teams?.tenantId, 100), clientId: text(r.teams?.clientId, 100) },
+    identity: { name: text(r.identity?.name, 100), email },
+    qaStore: { mode: storeMode, host: storeHost, port: storePort, database: storeDb, user: storeUser, ssl: store.ssl === true },
     setup: { completedAt: typeof r.setup?.completedAt === 'string' ? r.setup.completedAt : undefined, skipped: Array.isArray(r.setup?.skipped) ? r.setup.skipped.map(String).slice(0, 20) : [] },
   };
 }

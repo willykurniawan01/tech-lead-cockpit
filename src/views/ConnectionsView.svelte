@@ -15,6 +15,9 @@
   import { gitlab } from '../lib/gitlab/client';
   import type { GitLabStatus } from '../lib/gitlab/types';
   import { appSettings } from '../lib/settings/store.svelte';
+  import { confirmDialog } from '../components/confirm.svelte';
+  import { qa } from '../lib/qa/client';
+  import type { QAStoreMigration, QAStoreStatus } from '../lib/qa/types';
 
   let status = $state<ConnectorStatus | null>(null);
   let jiraStatus = $state<JiraStatus | null>(null);
@@ -76,10 +79,79 @@
     }
   }
 
+  // E2E storage: files on this laptop, or the shared PostgreSQL database used with QA.
+  let storeStatus = $state<QAStoreStatus | null>(null);
+  let showStoreSetup = $state(false);
+  let storeForm = $state({ ...appSettings.value.qaStore });
+  let identityForm = $state({ ...appSettings.value.identity });
+  let storePassword = $state('');
+  let storeBusy = $state<'' | 'test' | 'save' | 'migrate'>('');
+  let storeTest = $state('');
+  let migration = $state<QAStoreMigration | null>(null);
+
+  function toggleStoreSetup() {
+    // Settings load after mount: the form starts from what is saved now.
+    if (!showStoreSetup) {
+      storeForm = { ...appSettings.value.qaStore };
+      identityForm = { ...appSettings.value.identity };
+      storePassword = '';
+      storeTest = '';
+    }
+    showStoreSetup = !showStoreSetup;
+  }
+
+  async function testStore() {
+    storeBusy = 'test';
+    storeTest = '';
+    try {
+      const r = await qa.testStore($state.snapshot(storeForm), storePassword || undefined);
+      storeTest = `Terhubung ke PostgreSQL ${r.server}. Tabel E2E: ${r.schemaVersion ? `versi ${r.schemaVersion}` : 'belum ada (dibuat otomatis saat pertama dipakai)'}.`;
+    } catch (e) {
+      toasts.show((e as Error).message, 'err', 6000);
+    } finally {
+      storeBusy = '';
+    }
+  }
+
+  async function saveStore() {
+    storeBusy = 'save';
+    try {
+      if (storePassword) await appSettings.saveSecret('qastore', storePassword);
+      await appSettings.save({ qaStore: $state.snapshot(storeForm), identity: $state.snapshot(identityForm) });
+      storePassword = '';
+      showStoreSetup = false;
+      storeStatus = await qa.store().catch(() => null);
+      toasts.show(storeForm.mode === 'postgres' ? 'E2E sekarang memakai DB pusat.' : 'E2E sekarang memakai file lokal.', 'ok');
+    } catch (e) {
+      toasts.show(`Gagal menyimpan: ${(e as Error).message}`, 'err');
+    } finally {
+      storeBusy = '';
+    }
+  }
+
+  async function migrateStore() {
+    const ok = await confirmDialog({
+      title: 'Pindahkan data lokal ke DB pusat?',
+      message: `Folder data E2E lokal dibackup dulu, lalu test case, rencana journey, environment (tanpa token/password) dan riwayat run disalin ke ${storeStatus?.target ?? 'DB pusat'}. Data yang sudah ada di DB pusat tidak ditimpa, dan file lokal tetap ada.`,
+      confirmText: 'Pindahkan',
+    });
+    if (!ok) return;
+    storeBusy = 'migrate';
+    try {
+      migration = await qa.migrateStore();
+      toasts.show(`Selesai: ${migration.suites} suite, ${migration.runs} run dipindahkan.`, 'ok');
+    } catch (e) {
+      toasts.show((e as Error).message, 'err', 6000);
+    } finally {
+      storeBusy = '';
+    }
+  }
+
   async function refresh() {
     loading = true;
     error = '';
     try {
+      storeStatus = await qa.store().catch(() => null);
       status = await connector.status().catch(() => null);
       jiraStatus = await jira.status().catch(() => null);
       teamsStatus = await teams.status().catch(() => null);
@@ -445,6 +517,96 @@
           <li>Simpan token ke Keychain: <code>npm run token:confluence</code> atau gunakan form <strong>Setup Token</strong> di atas.</li>
         </ol>
       </details>
+    {/if}
+  </article>
+
+  <!-- Card: E2E storage -->
+  <article class="card">
+    <div class="card-head">
+      <Icon name="database" size={20} />
+      <h2>Penyimpanan E2E</h2>
+      {#if storeStatus?.mode === 'postgres'}
+        <span class="chip chip-ok"><Icon name="check" size={12} /> DB pusat</span>
+      {:else if storeStatus}
+        <span class="chip">Lokal</span>
+      {/if}
+      <button class="btn btn-sm btn-ghost" onclick={toggleStoreSetup}><Icon name="edit" size={13} /> Atur</button>
+    </div>
+
+    <dl>
+      <dt>Disimpan di</dt>
+      <dd>{storeStatus?.mode === 'postgres' ? `DB pusat (${storeStatus.target ?? '-'}), dipakai bersama QA Cockpit` : 'File di laptop ini (~/.tech-lead-cockpit/qa)'}</dd>
+      <dt>Isi</dt><dd>Test case, grup, rencana journey, riwayat run, environment (token dan password tetap di Keychain masing-masing)</dd>
+      <dt>Tercatat sebagai</dt><dd>{appSettings.value.identity.email || appSettings.value.identity.name || 'email git (belum diatur)'}</dd>
+    </dl>
+    {#if storeStatus?.error}<p class="alert"><Icon name="alert" /> {storeStatus.error}</p>{/if}
+
+    {#if storeStatus?.mode === 'postgres' && !showStoreSetup}
+      <div class="setup-actions">
+        <button class="btn btn-sm" onclick={migrateStore} disabled={storeBusy !== ''}>
+          <Icon name="upload" size={13} /> {storeBusy === 'migrate' ? 'Memindahkan…' : 'Pindahkan data lokal ke DB pusat'}
+        </button>
+      </div>
+      {#if migration}
+        <p class="muted font-sm">
+          Backup: <code>{migration.backupDir}</code>. Dipindahkan: {migration.projects} proyek, {migration.suites} suite, {migration.plans} rencana, {migration.environments} environment, {migration.runs} run.
+        </p>
+        {#if migration.skipped.length}
+          <p class="alert"><Icon name="alert" /> Dilewati (tidak ditimpa): {migration.skipped.join(' ')}</p>
+        {/if}
+      {/if}
+    {/if}
+
+    {#if showStoreSetup}
+      <div class="setup-form">
+        <div class="form-check">
+          <label><input type="radio" bind:group={storeForm.mode} value="file" /> File lokal (hanya laptop ini)</label>
+          <label><input type="radio" bind:group={storeForm.mode} value="postgres" /> DB pusat PostgreSQL (bersama QA)</label>
+        </div>
+        {#if storeForm.mode === 'postgres'}
+          <div class="form-row">
+            <label for="qs-host">Host</label>
+            <input id="qs-host" type="text" bind:value={storeForm.host} placeholder="10.0.0.5" />
+          </div>
+          <div class="form-row">
+            <label for="qs-port">Port</label>
+            <input id="qs-port" type="number" bind:value={storeForm.port} min="1" max="65535" />
+          </div>
+          <div class="form-row">
+            <label for="qs-db">Database</label>
+            <input id="qs-db" type="text" bind:value={storeForm.database} placeholder="tlc_qa" />
+          </div>
+          <div class="form-row">
+            <label for="qs-user">User</label>
+            <input id="qs-user" type="text" bind:value={storeForm.user} autocomplete="off" />
+          </div>
+          <div class="form-row">
+            <label for="qs-pass">Password</label>
+            <input id="qs-pass" type="password" bind:value={storePassword} placeholder={appSettings.secrets.qastore ? 'Tersimpan di Keychain (kosongkan bila tetap)' : ''} autocomplete="off" />
+            <small class="form-help">Disimpan di Keychain, tidak pernah ke file. Tabel dibuat otomatis saat pertama dipakai.</small>
+          </div>
+          <div class="form-check">
+            <label><input type="checkbox" bind:checked={storeForm.ssl} /> Pakai SSL</label>
+          </div>
+        {/if}
+        <div class="form-row">
+          <label for="qs-name">Nama Anda</label>
+          <input id="qs-name" type="text" bind:value={identityForm.name} />
+        </div>
+        <div class="form-row">
+          <label for="qs-email">Email Anda</label>
+          <input id="qs-email" type="email" bind:value={identityForm.email} placeholder="Kosong = email git" />
+          <small class="form-help">Dicatat sebagai pengubah terakhir test case, supaya yang lain tahu siapa yang menyimpan.</small>
+        </div>
+        {#if storeTest}<p class="muted font-sm"><Icon name="check" size={12} /> {storeTest}</p>{/if}
+        <div class="setup-actions">
+          {#if storeForm.mode === 'postgres'}
+            <button class="btn" onclick={testStore} disabled={storeBusy !== '' || !storeForm.host.trim() || !storeForm.user.trim()}>{storeBusy === 'test' ? 'Mengetes…' : 'Tes koneksi'}</button>
+          {/if}
+          <button class="btn btn-primary" onclick={saveStore} disabled={storeBusy !== ''}><Icon name="check" size={14} /> {storeBusy === 'save' ? 'Menyimpan…' : 'Simpan'}</button>
+          <button class="btn btn-ghost" onclick={() => (showStoreSetup = false)}>Batal</button>
+        </div>
+      </div>
     {/if}
   </article>
 

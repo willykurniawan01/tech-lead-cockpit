@@ -132,6 +132,11 @@ export interface QAEnvironment {
   hasSecret?: boolean;
   /** Set by the connector: names of variables whose values live in the Keychain (masked in results). */
   secretVariableNames?: string[];
+  /** Set by the store: bumped on every save; a save carrying an older one is refused (see QaConflictError). */
+  version?: number;
+  /** Set by the store: who saved it last (name or email from Settings), and when. */
+  updatedBy?: string;
+  updatedAt?: string;
 }
 
 export type QAAssertion =
@@ -238,6 +243,9 @@ export interface QAPlan {
   /** Variable contract shared by all stages. */
   variables: { name: string; description: string; producedBy?: string }[];
   notes?: string;
+  /** Set by the store, as on QASuite. */
+  version?: number;
+  updatedBy?: string;
 }
 
 export type QAAgentRole = 'plan' | 'write' | 'repair' | 'fix';
@@ -302,6 +310,52 @@ export interface QASuite {
   generatedAt?: string;
   ai?: AiSelection;
   updatedAt: string;
+  /**
+   * Set by the store: bumped on every save. A save must carry the version it was loaded with; an
+   * older one means someone else saved in between, and the save is refused instead of overwriting.
+   */
+  version?: number;
+  /** Set by the store: who saved it last (name or email from Settings). */
+  updatedBy?: string;
+}
+
+/** A TAD a project's test cases come from (read-only reference, e.g. for QA Cockpit). */
+export interface QATadRef {
+  draftId?: string;
+  title: string;
+  confluencePageId?: string;
+  confluenceUrl?: string;
+  jiraKeys?: string[];
+}
+
+/** A project in the E2E store: what QA Cockpit lists. Tech Lead Cockpit keeps it current. */
+export interface QAProject {
+  id: string;
+  name: string;
+  tads: QATadRef[];
+  updatedAt: string;
+  updatedBy?: string;
+}
+
+/** Where E2E data is kept: files in the data folder, or the shared PostgreSQL database. */
+export interface QAStoreStatus {
+  mode: 'file' | 'postgres';
+  /** host:port/database (postgres only). */
+  target?: string;
+  /** The connection failed (postgres only). */
+  error?: string;
+}
+
+/** Result of "Pindahkan data lokal ke DB pusat". */
+export interface QAStoreMigration {
+  backupDir: string;
+  projects: number;
+  suites: number;
+  plans: number;
+  environments: number;
+  runs: number;
+  /** Items already in the database with different content: left as they are. */
+  skipped: string[];
 }
 
 export interface QATaskInput {

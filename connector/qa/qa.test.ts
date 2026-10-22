@@ -381,11 +381,11 @@ describe('QaManager', () => {
     expect(saved.hasSecret).toBe(true);
     const file = await import('node:fs/promises').then((m) => m.readFile(join(dir, 'environments.json'), 'utf8'));
     expect(file).not.toContain('super-secret');
-    await qa.saveEnvironment(saved, '');
-    expect((await qa.listEnvironments())[0].hasSecret).toBe(false);
+    const [cleared] = await qa.saveEnvironment(saved, '');
+    expect(cleared.hasSecret).toBe(false);
 
     // Secret variables: stored outside the file, empty value keeps the stored one, removed lines go.
-    await qa.saveEnvironment({ ...saved, variables: { username: 'qa-user', password: 'plain' } }, undefined, { password: 'p@ss-1234', pin: '123456' });
+    await qa.saveEnvironment({ ...cleared, variables: { username: 'qa-user', password: 'plain' } }, undefined, { password: 'p@ss-1234', pin: '123456' });
     let [e] = await qa.listEnvironments();
     expect(e.secretVariableNames).toEqual(['password', 'pin']);
     expect(e.variables).toEqual({ username: 'qa-user' });
