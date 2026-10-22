@@ -45,6 +45,7 @@ describe('every test case ready to execute', () => {
     // The rules come before the list, so a long list can't cut them off.
     expect(plan.instruction.indexOf('"dataQueries"')).toBeLessThan(plan.instruction.indexOf('{{merchantId}}'));
     expect(plan.instruction).toContain('"dataQueries"');
+    expect(plan.instruction).toContain('Nilai di blok "variables" flow adalah CONTOH dari AI');
     expect(plan.instruction).toContain('jangan mengganti variabel yang sudah dihasilkan "extract"');
     expect(plan.instruction).not.toContain('{{pin}}');
     // Without databases nothing is "auto" from a query: the queried flow needs a value too.

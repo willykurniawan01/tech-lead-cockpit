@@ -21,10 +21,54 @@ export function extractJson(reply: string): unknown {
   try {
     return JSON.parse(json);
   } catch (e) {
+    // Prose before the JSON can hold braces of its own ("{{promoId}} belum punya nilai"): look for
+    // a complete object further on; the largest one that parses is the answer.
+    const found = balancedObjects(text)
+      .sort((a, b) => b.length - a.length)
+      .map(tryParse)
+      .find((v) => v !== undefined);
+    if (found !== undefined) return found;
     const at = Number((e as Error).message.match(/position (\d+)/)?.[1]);
     const near = Number.isFinite(at) ? ` Di sekitar: …${json.slice(Math.max(0, at - 60), at + 40).replace(/\s+/g, ' ')}…` : '';
     throw new Error(`JSON dari AI tidak valid: ${(e as Error).message}.${near}`);
   }
+}
+
+function tryParse(raw: string): unknown {
+  for (const candidate of [raw, repairJson(raw)]) {
+    try {
+      const v = JSON.parse(candidate);
+      if (v && typeof v === 'object') return v;
+    } catch {
+      /* next */
+    }
+  }
+  return undefined;
+}
+
+/** Every `{ … }` with balanced braces outside strings; `{{name}}` placeholders don't start one. */
+function balancedObjects(text: string): string[] {
+  const out: string[] = [];
+  for (let start = text.indexOf('{'); start >= 0; start = text.indexOf('{', start + 1)) {
+    if (text[start + 1] === '{' || text[start - 1] === '{') continue;
+    let depth = 0;
+    let inString = false;
+    for (let i = start; i < text.length; i++) {
+      const c = text[i];
+      if (inString) {
+        if (c === '\\') i++;
+        else if (c === '"') inString = false;
+        continue;
+      }
+      if (c === '"') inString = true;
+      else if (c === '{') depth++;
+      else if (c === '}' && --depth === 0) {
+        out.push(text.slice(start, i + 1));
+        break;
+      }
+    }
+  }
+  return out;
 }
 
 /**

@@ -279,6 +279,11 @@ describe('generator', () => {
     expect(extractJson(reply)).toEqual({ notes: 'pakai ({{a}}, {{b}}, {{c}}) dari tahap 4', flows: [] });
   });
 
+  it('finds the JSON after prose that has braces of its own', () => {
+    const reply = 'Variabel `{{promoUuidBiller}}` tidak punya nilai. Perlu `dataQueries` dengan {kondisi} status aktif.\n\n{"flows":[{"id":"f1","name":"x"}],"changes":[{"flowId":"f1","summary":"tambah dataQueries"}],"notes":"pakai {{$today}}"}\n\nSemoga membantu.';
+    expect(extractJson(reply)).toEqual({ flows: [{ id: 'f1', name: 'x' }], changes: [{ flowId: 'f1', summary: 'tambah dataQueries' }], notes: 'pakai {{$today}}' });
+  });
+
   it('fails clearly without JSON or flows', () => {
     expect(() => extractJson('maaf, tidak bisa')).toThrow('tidak berisi JSON');
     expect(() => parseQaReply('{"flows":[]}', [])).toThrow('tidak menghasilkan flow');
