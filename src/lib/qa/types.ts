@@ -45,6 +45,24 @@ export interface QADatabase {
   ssl?: boolean;
 }
 
+/**
+ * A service's Redis (cache), used only to delete keys before a step (`redisDel`) so a test does
+ * not read stale cached data. The password, if any, is in the Keychain.
+ */
+export interface QARedis {
+  /** Name steps use in "redis" (usually the service name, e.g. CORE-PROMO-ULTIMATE). */
+  name: string;
+  /** Service (as in the TAD) this Redis belongs to. */
+  service?: string;
+  host: string;
+  port?: number;
+  /** Logical database number (SELECT); default 0. */
+  db?: number;
+  /** ACL user (Redis 6+); empty uses AUTH with the password only. */
+  user?: string;
+  tls?: boolean;
+}
+
 /** A fully resolved connection (server details + database). */
 export interface QADbConnection {
   name: string;
@@ -80,8 +98,10 @@ export interface QADataQuery {
 
 /** A query run for a flow: data setup (variable) or a data check (assertion). */
 export interface QADbQueryLog {
-  /** data: fills a variable; check: a db assertion; setup: a change made before a step's request. */
+  /** data: fills a variable; check: a db assertion; setup: a change made before a step's request (DB or Redis). */
   kind: 'data' | 'check' | 'setup';
+  /** Set for a Redis key deletion (`db` is then the Redis name and `sql` the DEL command). */
+  redis?: boolean;
   /** Variable filled (data) or what was checked (check). */
   label: string;
   db: string;
@@ -116,13 +136,18 @@ export interface QAEnvironment {
   readOnly: boolean;
   /**
    * Test setup may change data in the databases (a step's `setup`: one UPDATE/INSERT/DELETE, WHERE
-   * required, few rows). Off by default and never on a read-only environment.
+   * required, few rows) and delete Redis keys (a step's `redisDel`). Off by default and never on a
+   * read-only environment.
    */
   dbWrites?: boolean;
   /** Server of the services' databases (one login). */
   dbServer?: QADbServer;
   /** Databases per service, for real test data and data checks (read-only). */
   databases?: QADatabase[];
+  /** Redis per service, for clearing cached keys before a step (needs `dbWrites`). */
+  redis?: QARedis[];
+  /** Set by the connector: Redis entries with a password in the Keychain. */
+  redisPasswords?: Record<string, boolean>;
   /** Set by the connector: the server password is in the Keychain. */
   dbServerPassword?: boolean;
   /** Set by the connector: databases with their own password in the Keychain. */
@@ -201,6 +226,17 @@ export interface QAStep {
    * active). Run only on environments with `dbWrites`; see connector/qa/db.ts executeSetup.
    */
   setup?: QADbSetup[];
+  /**
+   * Redis keys deleted right before the request (after `setup`), e.g. a cached promo
+   * snapshot that would hide data the flow just changed. Exact keys only; needs `dbWrites`.
+   */
+  redisDel?: QARedisDel[];
+}
+
+/** Exact keys to delete on one of the environment's Redis ({{variables}} allowed, no patterns). */
+export interface QARedisDel {
+  redis: string;
+  keys: string[];
 }
 
 /** One statement changing test data: UPDATE/INSERT/DELETE on one of the environment's databases. */
@@ -455,6 +491,8 @@ export interface QAGenerateRequest {
   databases?: { name: string; service?: string; schema: string; error?: string }[];
   /** The environment lets test setup change data (prompts may then write a step's `setup`). */
   dbWrites?: boolean;
+  /** Filled by the connector when `dbWrites`: the environment's Redis names (for a step's `redisDel`). */
+  redis?: { name: string; service?: string }[];
 }
 
 export type QAJobStatus = 'running' | 'done' | 'error' | 'cancelled';

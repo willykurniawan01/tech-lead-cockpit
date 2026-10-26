@@ -46,6 +46,8 @@
     useEnvAuth: boolean;
     /** Data changes before the request, one per line: `db: UPDATE …`. */
     setup: string;
+    /** Redis keys deleted before the request, one Redis per line: `redis: key1 key2`. */
+    redisDel: string;
     curl: string;
     curlOpen: boolean;
   }
@@ -101,6 +103,7 @@
       extras,
       useEnvAuth: s.useEnvAuth !== false,
       setup: (s.setup ?? []).map((x) => `${x.db}: ${x.sql.replace(/\s*\n\s*/g, ' ')}`).join('\n'),
+      redisDel: (s.redisDel ?? []).map((x) => `${x.redis}: ${x.keys.join(' ')}`).join('\n'),
       curl: '',
       curlOpen: false,
     };
@@ -168,6 +171,17 @@
             if (at <= 0 || !l.slice(at + 1).trim()) throw new Error(`${where} ubah data DB baris ${n + 1}: format "nama_db: UPDATE …".`);
             return { db: l.slice(0, at).trim(), sql: l.slice(at + 1).trim() };
           });
+        const redisDel = s.redisDel
+          .split('\n')
+          .map((l) => l.trim())
+          .filter(Boolean)
+          .map((l, n) => {
+            const at = l.indexOf(':');
+            const keys = l.slice(at + 1).trim().split(/\s+/).filter(Boolean);
+            if (at <= 0 || !keys.length) throw new Error(`${where} hapus key Redis baris ${n + 1}: format "nama_redis: key1 key2".`);
+            if (keys.some((k) => k.includes('*'))) throw new Error(`${where} hapus key Redis baris ${n + 1}: tulis key lengkap, pola (*) tidak didukung.`);
+            return { redis: l.slice(0, at).trim(), keys };
+          });
         return {
           id: s.id,
           name: s.name.trim() || `Step ${i + 1}`,
@@ -177,6 +191,7 @@
           extract,
           ...(s.useEnvAuth ? {} : { useEnvAuth: false }),
           ...(setup.length ? { setup } : {}),
+          ...(redisDel.length ? { redisDel } : {}),
         };
       }),
     };
@@ -394,6 +409,10 @@
             <label class="field">
               <span>Ubah data DB sebelum request <em class="muted">(opsional, satu per baris: <code>nama_db: UPDATE …</code>; hanya jalan bila environment mengizinkan ubah data DB, UPDATE/DELETE wajib WHERE)</em></span>
               <textarea class="input mono" rows="2" bind:value={s.setup} placeholder={"CORE-PROMO-ULTIMATE: UPDATE promo SET start_date = now() - interval '1 minute' WHERE uuid = '{{promoUuid}}'"}></textarea>
+            </label>
+            <label class="field">
+              <span>Hapus key Redis sebelum request <em class="muted">(opsional, untuk cache yang membuat data lama terbaca; satu Redis per baris: <code>nama_redis: key1 key2</code>; key lengkap tanpa *, jalan setelah ubah data DB dan hanya bila environment mengizinkan)</em></span>
+              <textarea class="input mono" rows="2" bind:value={s.redisDel} placeholder={"CORE-PROMO-ULTIMATE: promo:active:BILLER promo:active:ver:BILLER"}></textarea>
             </label>
 
             <div class="box">

@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { extractJson } from '../ai-json.ts';
 import { assertReadOnlySql, assertSetupSql } from './db.ts';
+import { assertRedisKeys } from './redis.ts';
 import {
   QA_CATEGORIES,
   QA_CATEGORY_LABELS,
@@ -139,6 +140,19 @@ export const DB_SETUP_RULES = [
   '- Jangan pakai "setup" untuk hal yang bisa dibuat lewat API, dan jangan mengubah data di luar yang dibuat test.',
 ].join('\n');
 
+/** The environment's Redis (when it allows setup changes): agents may clear cached keys before a step. */
+export function redisSection(redis: QAGenerateRequest['redis']): string {
+  if (!redis?.length) return '';
+  return [
+    '',
+    '## Hapus cache Redis untuk setup test (environment ini mengizinkan)',
+    '- Bila service menyimpan data di cache Redis sehingga perubahan dari step sebelumnya (mis. promo baru diaktifkan, data diubah lewat "setup") belum terbaca, tambahkan "redisDel" di step yang membaca data itu: key dihapus TEPAT SEBELUM request (setelah "setup").',
+    '- Format: "redisDel": [{ "redis": "nama Redis", "keys": ["promo:active:BILLER", "promo:active:ver:BILLER"] }]',
+    '- Key PERSIS seperti yang ditulis kode service (cari di codebase: Set/Get/Del ke Redis); boleh memakai {{variabel}}; tanpa pola (*), maksimal 20 key per item. Hanya key cache yang terkait data test ini.',
+    `- Redis yang tersedia: ${redis.map((r) => `"${r.name}"${r.service && r.service !== r.name ? ` (service ${r.service})` : ''}`).join(', ')}.`,
+  ].join('\n');
+}
+
 export function databaseSection(dbs: NonNullable<QAGenerateRequest['databases']>, dbWrites = false): string {
   if (!dbs.length) return '';
   return [
@@ -201,6 +215,7 @@ export function buildQaPrompt(req: QAGenerateRequest): string {
     req.codebase ? codebaseSection(req.codebase) : '',
     req.focus ? focusSection(req.focus) : '',
     databaseSection(req.databases ?? [], req.dbWrites),
+    redisSection(req.redis),
     existing,
     '',
     '## Detail Task',
@@ -294,6 +309,22 @@ function normalizeSetup(raw: unknown): QAStep['setup'] {
   return out.length ? out : undefined;
 }
 
+function normalizeRedisDel(raw: unknown): QAStep['redisDel'] {
+  const out: NonNullable<QAStep['redisDel']> = [];
+  for (const item of Array.isArray(raw) ? raw.slice(0, 5) : []) {
+    const q = (item ?? {}) as Record<string, unknown>;
+    const redis = str(q.redis, 60);
+    let keys: string[] | undefined;
+    try {
+      keys = assertRedisKeys(q.keys);
+    } catch {
+      keys = undefined;
+    }
+    if (redis && keys) out.push({ redis, keys });
+  }
+  return out.length ? out : undefined;
+}
+
 function normalizeStep(raw: unknown, i: number): QAStep | undefined {
   if (!raw || typeof raw !== 'object') return undefined;
   const s = raw as Record<string, unknown>;
@@ -328,6 +359,7 @@ function normalizeStep(raw: unknown, i: number): QAStep | undefined {
     extract: strRecord(s.extract ?? s.extractVariables, 20),
     useEnvAuth: s.useEnvAuth === false ? false : undefined,
     ...(normalizeSetup(s.setup) ? { setup: normalizeSetup(s.setup) } : {}),
+    ...(normalizeRedisDel(s.redisDel) ? { redisDel: normalizeRedisDel(s.redisDel) } : {}),
   };
 }
 

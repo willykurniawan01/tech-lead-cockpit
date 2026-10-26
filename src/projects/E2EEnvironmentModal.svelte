@@ -40,6 +40,9 @@
   let serverDbs = $state<string[]>([]);
   let listing = $state(false);
   let rowStatus = $state<Record<number, { ok: boolean; text: string } | 'testing'>>({});
+  /** New Redis passwords by row (sent once, then kept in the Keychain). */
+  let redisPasswords = $state<Record<number, string>>({});
+  let redisStatus = $state<Record<number, { ok: boolean; text: string } | 'testing'>>({});
   /** Services matched automatically but not word for word: the user should look at them. */
   let uncertain = $state(new Set<string>());
 
@@ -114,6 +117,29 @@
     }
   }
 
+  function addRedis() {
+    if (!editing) return;
+    editing.redis = [...(editing.redis ?? []), { name: '', service: '', host: editing.dbServer?.host ?? '', port: 6379 }];
+  }
+  function removeRedis(i: number) {
+    if (!editing?.redis) return;
+    editing.redis = editing.redis.filter((_, j) => j !== i);
+    redisPasswords = Object.fromEntries(Object.entries(redisPasswords).filter(([k]) => Number(k) !== i).map(([k, v]) => [Number(k) > i ? Number(k) - 1 : Number(k), v]));
+    redisStatus = {};
+  }
+  async function testRedisRow(i: number) {
+    const r = editing?.redis?.[i];
+    if (!r) return;
+    redisStatus[i] = 'testing';
+    const id = await savedId();
+    if (!id) return void (redisStatus[i] = { ok: false, text: error || 'Simpan gagal.' });
+    try {
+      redisStatus[i] = { ok: true, text: await qa.testRedis(id, r.service || r.name) };
+    } catch (e) {
+      redisStatus[i] = { ok: false, text: (e as Error).message };
+    }
+  }
+
   const toLines = (r: Record<string, string>, sep: string) =>
     Object.entries(r)
       .map(([k, v]) => `${k}${sep}${v}`)
@@ -151,6 +177,9 @@
     serverPassword = '';
     serverStatus = null;
     rowStatus = {};
+    e.redis ??= [];
+    redisPasswords = {};
+    redisStatus = {};
   }
 
   async function save(keepOpen = false): Promise<boolean> {
@@ -158,6 +187,7 @@
     error = '';
     let env: QAEnvironment;
     let secretVariables: Record<string, string> | undefined;
+    let newRedisPasswords: Record<string, string> = {};
     try {
       secretVariables = secretVarsText.trim() === secretVarsInitial.trim() ? undefined : fromLines(secretVarsText, '=', 'Variabel rahasia');
       env = {
@@ -167,7 +197,15 @@
         variables: fromLines(variablesText, '='),
         dbServer: editing.dbServer?.host?.trim() ? $state.snapshot(editing.dbServer) : undefined,
         databases: (editing.databases ?? []).filter((d) => (d.service || d.name).trim() || d.database.trim()).map((d) => ({ ...$state.snapshot(d), name: (d.service || d.name).trim(), service: d.service?.trim() || undefined })),
+        redis: (editing.redis ?? []).filter((r) => (r.service || r.name).trim() || r.host.trim()).map((r) => ({ ...$state.snapshot(r), name: (r.service || r.name).trim(), service: r.service?.trim() || undefined })),
       };
+      // Passwords by Redis name; rows left empty keep the stored one.
+      newRedisPasswords = Object.fromEntries(
+        Object.entries(redisPasswords)
+          .filter(([, v]) => v)
+          .map(([i, v]) => [(editing!.redis?.[Number(i)]?.service || editing!.redis?.[Number(i)]?.name || '').trim(), v])
+          .filter(([k]) => k),
+      );
     } catch (e) {
       error = (e as Error).message;
       return false;
@@ -175,15 +213,16 @@
     saving = true;
     try {
       const before = new Set(environments.map((e) => e.id));
-      environments = await qa.saveEnvironment(env, clearSecret ? '' : secret || undefined, secretVariables, undefined, serverPassword || undefined);
+      environments = await qa.saveEnvironment(env, clearSecret ? '' : secret || undefined, secretVariables, undefined, serverPassword || undefined, Object.keys(newRedisPasswords).length ? newRedisPasswords : undefined);
       const saved = env.id ? env.id : environments.find((e) => !before.has(e.id))?.id;
       if (saved) selectedId = saved;
       secret = '';
       serverPassword = '';
+      redisPasswords = {};
       if (keepOpen) {
         const fresh = environments.find((e) => e.id === saved);
         // The new version too: the next save from this form must not look like a stale one.
-        if (fresh && editing) Object.assign(editing, { id: fresh.id, version: fresh.version, hasSecret: fresh.hasSecret, dbServerPassword: fresh.dbServerPassword, dbPasswords: fresh.dbPasswords });
+        if (fresh && editing) Object.assign(editing, { id: fresh.id, version: fresh.version, hasSecret: fresh.hasSecret, dbServerPassword: fresh.dbServerPassword, dbPasswords: fresh.dbPasswords, redisPasswords: fresh.redisPasswords });
       } else {
         editing = null;
         toasts.show('Environment tersimpan.', 'ok', 2000);
@@ -230,7 +269,7 @@
           </div>
           <div class="env-tags">
             {#if env.readOnly}<span class="chip chip-ok">Read-only</span>{/if}
-            {#if env.dbWrites}<span class="chip chip-warn" title="Step test boleh mengubah data di database (setup)">Ubah data DB</span>{/if}
+            {#if env.dbWrites}<span class="chip chip-warn" title="Step test boleh mengubah data di database dan menghapus key Redis (setup)">Ubah data DB{env.redis?.length ? '/Redis' : ''}</span>{/if}
             {#if env.secretVariableNames?.length}<span class="chip" title={env.secretVariableNames.join(', ')}><Icon name="lock" size={11} /> {env.secretVariableNames.length} rahasia</span>{/if}
             {#if env.auth.type !== 'none'}<span class="chip {env.hasSecret ? '' : 'chip-warn'}"><Icon name="key" size={11} /> {env.auth.type}{env.hasSecret ? '' : ' (token kosong)'}</span>{/if}
           </div>
@@ -327,7 +366,7 @@
           <label class="check small db-writes" class:off={editing.readOnly}>
             <input type="checkbox" bind:checked={editing.dbWrites} disabled={editing.readOnly} />
             <span>
-              <strong>Izinkan ubah data DB untuk setup test.</strong> Step boleh menjalankan satu UPDATE/INSERT/DELETE sebelum request-nya (mis. memajukan tanggal mulai promo milik test). UPDATE/DELETE wajib pakai WHERE; lebih dari 20 baris berubah dibatalkan; tanpa DDL. Perubahan ini nyata dan terlihat oleh semua pemakai database ini. {editing.readOnly ? 'Tidak tersedia untuk environment Read-only.' : 'Pakai hanya untuk database development/test.'}
+              <strong>Izinkan ubah data DB/Redis untuk setup test.</strong> Step boleh menjalankan satu UPDATE/INSERT/DELETE sebelum request-nya (mis. memajukan tanggal mulai promo milik test) dan menghapus key cache Redis (key lengkap, tanpa pola). UPDATE/DELETE wajib pakai WHERE; lebih dari 20 baris berubah dibatalkan; tanpa DDL. Perubahan ini nyata dan terlihat oleh semua pemakai database ini. {editing.readOnly ? 'Tidak tersedia untuk environment Read-only.' : 'Pakai hanya untuk database development/test.'}
             </span>
           </label>
         </div>
@@ -377,6 +416,38 @@
         <datalist id="db-services">{#each knownServices as sv (sv)}<option value={sv}></option>{/each}</datalist>
         <datalist id="db-names">{#each serverDbs as dn (dn)}<option value={dn}></option>{/each}</datalist>
         <p class="muted small">Saat generate, AI hanya membaca skema database milik service dari task yang dipilih. Saran: pakai user yang hanya punya izin SELECT.</p>
+      </section>
+
+      <section class="dbs">
+        <div class="dbs-head">
+          <strong>Redis per service ({editing.redis?.length ?? 0})</strong>
+          <span class="muted small">Untuk menghapus key cache sebelum step (mis. snapshot promo) supaya test tidak membaca data lama. Hanya DEL key lengkap; jalan bila ubah data DB/Redis diizinkan di atas.</span>
+          <span class="grow"></span>
+          <button class="btn btn-sm" type="button" onclick={addRedis}><Icon name="plus" size={12} /> Redis</button>
+        </div>
+        {#if editing.redis?.length}
+          <div class="map">
+            <div class="redis-row head"><span>Service</span><span>Host</span><span>Port</span><span>DB</span><span>User</span><span>Password</span><span></span></div>
+            {#each editing.redis as r, i (i)}
+              <div class="redis-row">
+                <input class="input mono" bind:value={r.service} list="db-services" placeholder="core-promo-ultimate" aria-label="Service" />
+                <input class="input mono" bind:value={r.host} placeholder="10.0.0.5" aria-label="Host Redis" />
+                <input class="input mono" type="number" bind:value={r.port} placeholder="6379" aria-label="Port Redis" />
+                <input class="input mono" type="number" min="0" max="15" bind:value={r.db} placeholder="0" aria-label="Nomor db Redis" />
+                <input class="input mono" bind:value={r.user} autocomplete="off" placeholder="(opsional)" aria-label="User Redis" />
+                <input class="input" type="password" bind:value={redisPasswords[i]} autocomplete="off" placeholder={editing.redisPasswords?.[r.service || r.name] ? '(tersimpan)' : '(opsional)'} aria-label="Password Redis" />
+                <span class="row-actions">
+                  <label class="check small" title="Koneksi TLS"><input type="checkbox" bind:checked={r.tls} /> TLS</label>
+                  {#if redisStatus[i] === 'testing'}<span class="muted small">…</span>{:else if redisStatus[i]}{@const st = redisStatus[i] as { ok: boolean; text: string }}<span class="small {st.ok ? 'ok' : 'err'}" title={st.text}>{st.ok ? 'OK' : 'Gagal'}</span>{/if}
+                  <button class="btn btn-ghost btn-xs" type="button" onclick={() => testRedisRow(i)} disabled={saving || !r.host} title="Simpan & tes Redis ini">Tes</button>
+                  <button class="btn btn-ghost btn-xs" type="button" onclick={() => removeRedis(i)} aria-label="Hapus Redis"><Icon name="trash" size={11} /></button>
+                </span>
+              </div>
+            {/each}
+          </div>
+        {:else}
+          <p class="muted small">Belum ada. Tambahkan bila service menyimpan data di cache Redis (host, port, dan nomor db sesuai konfigurasi service). Password disimpan di Keychain.</p>
+        {/if}
       </section>
 
       <p class="muted small">Token, password, dan variabel rahasia disimpan di macOS Keychain, tidak pernah dikirim ke AI, dan disamarkan (<code>***</code>) di hasil run maupun perintah curl. Variabel biasa tersimpan sebagai teks di <code>~/.tech-lead-cockpit/qa</code>.</p>
@@ -524,6 +595,33 @@
     grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) 170px;
     align-items: center;
     gap: 6px;
+  }
+  .redis-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1.3fr) minmax(0, 1.1fr) 70px 52px minmax(0, 0.8fr) minmax(0, 0.9fr) 150px;
+    align-items: center;
+    gap: 6px;
+  }
+  .redis-row.head {
+    position: sticky;
+    top: 0;
+    background: var(--surface-2);
+    font-size: 11px;
+    color: var(--text-3);
+    text-transform: uppercase;
+  }
+  .redis-row .input {
+    font-size: 12px;
+    padding-top: 4px;
+    padding-bottom: 4px;
+  }
+  @media (max-width: 720px) {
+    .redis-row {
+      grid-template-columns: 1fr 1fr;
+    }
+    .redis-row.head {
+      display: none;
+    }
   }
   .map-row.head {
     position: sticky;

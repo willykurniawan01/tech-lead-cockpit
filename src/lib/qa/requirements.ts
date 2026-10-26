@@ -50,13 +50,14 @@ function names(value: unknown, out: Set<string>) {
   else if (value && typeof value === 'object') Object.values(value).forEach((v) => names(v, out));
 }
 
-/** The {{names}} one flow uses (request, assertions, data queries). */
+/** The {{names}} one flow uses (request, assertions, data queries, setup and Redis keys). */
 export function flowVariables(flow: QAFlow): Set<string> {
   const out = new Set<string>();
   for (const s of flow.steps) {
     names([s.request.path, s.request.headers, s.request.query, s.request.body], out);
     for (const a of s.assertions) names(a.type === 'db' ? [a.sql, a.expected] : 'expected' in a ? a.expected : undefined, out);
     for (const st of s.setup ?? []) names(st.sql, out);
+    for (const r of s.redisDel ?? []) names(r.keys, out);
   }
   for (const q of flow.dataQueries ?? []) names(q.sql, out);
   return out;

@@ -43,6 +43,11 @@ export interface RunContext {
    */
   execute?: (db: string, sql: string) => Promise<QADbResult>;
   /**
+   * Deletes exact keys on one of the environment's Redis (a step's `redisDel`); returns how many
+   * existed. Only given with `dbWrites`, like `execute`.
+   */
+  redisDel?: (redis: string, keys: string[]) => Promise<number>;
+  /**
    * Values extracted by earlier flows of the same run (the journey: create promo → approve →
    * reserve…), with the flow that produced each and the JSON type it had. Shared and updated across flows.
    */
@@ -255,6 +260,40 @@ async function runSetup(ctx: RunContext, step: QAStep, vars: Record<string, stri
   return { logs };
 }
 
+/**
+ * A step's Redis key deletions, after its DB setup (the cache is dropped once the data it caches
+ * changed). Values go into the keys as they are: a key is one argument, so nothing can be injected.
+ */
+async function runRedisDel(ctx: RunContext, step: QAStep, vars: Record<string, string>): Promise<{ logs: QADbQueryLog[]; error?: string }> {
+  const logs: QADbQueryLog[] = [];
+  for (const s of step.redisDel ?? []) {
+    const at = new Date().toISOString();
+    const missing = new Set<string>();
+    const keys = s.keys.map((k) => interpolate(k, vars, missing));
+    const label = `hapus key Redis ${s.redis}`;
+    const command = `DEL ${keys.join(' ')}`;
+    const log = { kind: 'setup' as const, redis: true, label, db: s.redis, sql: command, at };
+    if (missing.size) {
+      const error = `Variabel belum punya nilai: ${[...missing].map((m) => `{{${m}}}`).join(', ')}`;
+      logs.push({ ...log, ok: false, error });
+      return { logs, error: `Hapus key Redis gagal: ${error}` };
+    }
+    if (!ctx.redisDel) {
+      const error = ctx.env.readOnly ? `Environment "${ctx.env.name}" read-only: key Redis tidak dihapus.` : `Environment "${ctx.env.name}" tidak mengizinkan ubah data; aktifkan "Izinkan ubah data DB/Redis untuk setup test" di Environment.`;
+      logs.push({ ...log, ok: false, error });
+      return { logs, error: `Hapus key Redis tidak dijalankan: ${error}` };
+    }
+    try {
+      const n = await ctx.redisDel(s.redis, keys);
+      logs.push({ ...log, ok: true, value: `${n} dari ${keys.length} key dihapus` });
+    } catch (e) {
+      logs.push({ ...log, ok: false, error: (e as Error).message });
+      return { logs, error: `Hapus key Redis gagal: ${(e as Error).message}` };
+    }
+  }
+  return { logs };
+}
+
 /** Runs one query for a flow and logs it (never throws). */
 async function logQuery(ctx: RunContext, kind: QADbQueryLog['kind'], label: string, db: string, sql: string, vars: Record<string, string>): Promise<QADbQueryLog> {
   const at = new Date().toISOString();
@@ -376,7 +415,12 @@ async function runStep(step: QAStep, vars: Record<string, string>, types: Record
   }
 
   // Data the request needs (e.g. a promo that has already started), changed right before it.
-  const setup = step.setup?.length ? await runSetup(ctx, step, vars) : { logs: [] as QADbQueryLog[] };
+  // Then the cache over that data (e.g. a promo snapshot), so the request reads it fresh.
+  let setup = step.setup?.length ? await runSetup(ctx, step, vars) : { logs: [] as QADbQueryLog[] };
+  if (!setup.error && step.redisDel?.length) {
+    const cleared = await runRedisDel(ctx, step, vars);
+    setup = { logs: [...setup.logs, ...cleared.logs], error: cleared.error };
+  }
   const dbSetup = setup.logs.length ? { dbSetup: setup.logs } : {};
   if (setup.error) return { result: { ...base, status: 'error', request, curl, error: setup.error, ...dbSetup }, extracted: {}, extractedTypes: {} };
 

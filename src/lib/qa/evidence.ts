@@ -70,7 +70,7 @@ function dbLogs(title: string, logs: QADbQueryLog[] | undefined): string {
   if (!logs?.length) return '';
   const rows = logs.map((l) => `<tr><td>${esc(l.label)}</td><td>${esc(l.db)}</td><td>${l.ok ? '✅' : '❌'}</td><td>${esc(l.value ?? l.error ?? (l.reusedFrom ? `dari ${l.reusedFrom}` : ''))}</td></tr>`).join('');
   const sql = logs.map((l) => `-- ${l.label} (${l.db})\n${l.sql}`).join('\n\n');
-  return `<p><strong>${esc(title)}</strong></p><table><tbody><tr><th>Untuk</th><th>DB</th><th>OK</th><th>Hasil</th></tr>${rows}</tbody></table>${code(sql, 'sql', 'SQL')}`;
+  return `<p><strong>${esc(title)}</strong></p><table><tbody><tr><th>Untuk</th><th>DB/Redis</th><th>OK</th><th>Hasil</th></tr>${rows}</tbody></table>${code(sql, 'sql', 'SQL')}`;
 }
 
 function stepBody(st: QAStepResult): string {

@@ -188,6 +188,27 @@ Ada kondisi yang tidak bisa dibuat lewat API, misalnya promo yang tanggal mulain
   - FlowEditor punya isian "Ubah data DB sebelum request" (`nama_db: UPDATE …`, satu per baris). `normalizeEditedFlow` membuang pernyataan yang tidak lolos pengaman.
   - Prompt penulis, perbaikan, dan repair memuat `DB_SETUP_RULES` hanya bila environment-nya `dbWrites` (`prepareContext` mengisi `req.dbWrites`). AI diminta memakai setup hanya untuk kondisi yang tidak bisa dibuat lewat API, dengan WHERE yang menyasar data milik test.
 
+### 🧹 Hapus key Redis sebelum step (`step.redisDel`)
+
+Service bisa menyimpan data di cache Redis, sehingga perubahan dari step sebelumnya belum terbaca. Contohnya snapshot promo aktif `promo:active:<serviceType>` (+ `promo:active:ver:<serviceType>`) di core-promo-ultimate. Snapshot ini hanya dibangun ulang lewat CMS, jadi tidak ikut berubah saat `setup` mengubah promo langsung di DB. Untuk kasus seperti ini, sebuah step boleh punya `redisDel`: daftar `{ redis, keys }` yang dihapus **tepat sebelum request, setelah `setup`** (cache dibuang setelah datanya berubah).
+
+- **Redis per service** di environment: `QAEnvironment.redis` (`{ name, service, host, port, db, user, tls }`). Ada bagian "Redis per service" di modal Environment dengan tombol Tes per baris (`POST /qa/redis/test`, `testRedisConnection`). Password-nya ada di Keychain (`<envId>:redis:<name>`, `redisPasswords` ditandai oleh connector). Di export, password ini ikut di `databases` dengan prefix `redis:` (format `env-transfer.ts` tidak berubah).
+- **Izin** sama dengan setup DB: `dbWrites`, dan tidak pernah di environment Read-only (`QaManager.redisDel`). Tanpa izin, step gagal dengan pesan jelas dan tidak mengirim request.
+- **Pengaman** ([`connector/qa/redis.ts`](../../../connector/qa/redis.ts), client RESP minimal tanpa dependensi):
+  - Perintah yang dikirim hanya AUTH, SELECT, DEL, PING, dan INFO.
+  - `assertRedisKeys` membatasi key: key lengkap tanpa pola `*`, tanpa karakter kontrol, maks. 20 key per item, dan tiap key maks. 512 karakter. Tidak ada SCAN/KEYS/FLUSH.
+  - AUTH atau SELECT yang gagal menghentikan sesi. Timeout 10 detik.
+  - `{{variabel}}` di key diisi apa adanya. Satu key adalah satu argumen RESP, jadi tidak bisa disisipi perintah lain.
+- **Jejak.**
+  - Dicatat di `step.dbSetup` (`redis: true`, `sql` = `DEL …`, hasil "n dari m key dihapus").
+  - Dialog konfirmasi run menyebut step yang menghapus key Redis.
+  - Audit `qa.run` mencatat "n hapus key Redis: <redis>".
+  - Kartu flow menampilkan baris "Hapus key Redis …".
+- **Edit dan AI.**
+  - FlowEditor punya isian "Hapus key Redis sebelum request" (`nama_redis: key1 key2`, satu Redis per baris). `normalizeEditedFlow` membuang key yang tidak lolos pengaman.
+  - Prompt penulis, perbaikan, dan repair memuat `redisSection` dengan nama Redis-nya (tanpa host/password) bila environment `dbWrites` punya Redis. Repair diberi petunjuk: data lama karena cache → `redisDel`.
+- `suite-diff.ts` (identik dengan QA Cockpit) tidak punya label khusus. Perubahan yang hanya di `redisDel` tetap terdeteksi sebagai test case berubah. Rincian per field ada di `change-view.ts` ("Setup data DB/Redis").
+
 ## ✅ Semua test case siap dijalankan (isi otomatis dari database)
 
 Di atas panel "Yang perlu diatur", banner menunjukkan berapa test case dari **seluruh suite** yang belum siap dijalankan. Hitungannya memakai `notReady`/`dbFillPlan` ([`src/lib/qa/db-fill.ts`](../../../src/lib/qa/db-fill.ts)) di atas `e2eRequirements`: variabel yang kosong atau masih contoh AI. Nilai di environment, hasil `extract`, dan query DB dihitung sebagai siap.

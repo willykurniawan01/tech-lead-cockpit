@@ -139,7 +139,10 @@ function stepSections(b: QAStep | undefined, a: QAStep | undefined): ChangeSecti
   const rb = req(b);
   const ra = req(a);
   const asserts = (s: QAStep | undefined) => Object.fromEntries((s?.assertions ?? []).map((x, i) => [`${assertionKey(x)}#${(s?.assertions ?? []).slice(0, i).filter((y) => assertionKey(y) === assertionKey(x)).length}`, assertionText(x)]));
-  const setup = (s: QAStep | undefined) => Object.fromEntries((s?.setup ?? []).map((x, i) => [`Setup ${i + 1} (${x.db})`, x.sql.replace(/\s+/g, ' ').trim()]));
+  const setup = (s: QAStep | undefined) => ({
+    ...Object.fromEntries((s?.setup ?? []).map((x, i) => [`Setup ${i + 1} (${x.db})`, x.sql.replace(/\s+/g, ' ').trim()])),
+    ...Object.fromEntries((s?.redisDel ?? []).map((x, i) => [`Hapus key Redis ${i + 1} (${x.redis})`, x.keys.join(' ')])),
+  });
   return [
     // Auth is on by default: only a step without it says so.
     { title: 'Step', rows: [...(whole ? [] : one('Nama', b?.name, a?.name)), ...one('Auth environment', b?.useEnvAuth === false ? 'tidak dipakai' : undefined, a?.useEnvAuth === false ? 'tidak dipakai' : undefined)] },
@@ -155,7 +158,7 @@ function stepSections(b: QAStep | undefined, a: QAStep | undefined): ChangeSecti
     // Expectations: one row each, the sentence itself (old one shown when its value changed).
     { title: 'Ekspektasi', rows: compare(asserts(b), asserts(a), () => '') },
     { title: 'Ambil variabel', rows: compare(b?.extract ?? {}, a?.extract ?? {}, (k) => `{{${k}}}`) },
-    { title: 'Setup data DB', rows: compare(setup(b), setup(a)) },
+    { title: 'Setup data DB/Redis', rows: compare(setup(b), setup(a)) },
   ].filter((s) => s.rows.length);
 }
 

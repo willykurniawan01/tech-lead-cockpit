@@ -5,8 +5,9 @@ import { join } from 'node:path';
 import type { AiSelection } from '../../src/lib/ai/types.ts';
 import type { QAEnvImportAction, QAEnvImportPreview, QARunEvidence, QASuiteReview } from '../../src/lib/qa/types.ts';
 import { evidenceStorage, evidenceTitle } from '../../src/lib/qa/evidence.ts';
-import type { QAAgentJob, QADatabase, QADbConnection, QADbResult, QADbServer, QAEnvironment, QAPipeline, QAPlan, QAProject, QASuspect, QAFlow, QAFlowResult, QAGenerateJob, QAGenerateRequest, QARun, QARunRequest, QASuite, QATadRef } from '../../src/lib/qa/types.ts';
+import type { QAAgentJob, QADatabase, QARedis, QADbConnection, QADbResult, QADbServer, QAEnvironment, QAPipeline, QAPlan, QAProject, QASuspect, QAFlow, QAFlowResult, QAGenerateJob, QAGenerateRequest, QARun, QARunRequest, QASuite, QATadRef } from '../../src/lib/qa/types.ts';
 import { executeSetup, listDatabases, QaDbError, queryReadOnly, schemaSummary, testConnection } from './db.ts';
+import { deleteKeys, testRedis } from './redis.ts';
 import { matchDatabases } from '../../src/lib/qa/db-match.ts';
 import { buildQaPrompt, dedupeStepIds, parseQaReply, QA_SYSTEM_PROMPT } from './generator.ts';
 import { arrangeFlows, groupOrder } from '../../src/lib/qa/groups.ts';
@@ -72,15 +73,25 @@ export interface QaDeps {
     list: (server: QADbConnection, password: string | undefined) => Promise<string[]>;
     execute?: (db: QADbConnection, password: string | undefined, sql: string) => Promise<QADbResult>;
   };
+  /** Redis access (key deletion for test setup, connection test); tests inject a fake. */
+  redis?: {
+    del: (conn: QARedis, password: string | undefined, keys: string[]) => Promise<number>;
+    test: (conn: QARedis, password: string | undefined) => Promise<string>;
+  };
 }
 
 const REAL_DB = { query: queryReadOnly, schema: schemaSummary, test: testConnection, list: listDatabases, execute: executeSetup };
+const REAL_REDIS = { del: deleteKeys, test: testRedis };
+const MAX_REDIS = 40;
 const DB_NAME = /^[A-Za-z][\w.-]{0,79}$/;
 const MAX_DATABASES = 80;
 /** Databases whose schema the AI reads in one generation (the selected tasks' services). */
 const MAX_SCHEMA_DBS = 8;
 const dbSecretKey = (envId: string, name: string) => `${envId}:db:${name}`;
 const serverSecretKey = (envId: string) => `${envId}:dbserver`;
+const redisSecretKey = (envId: string, name: string) => `${envId}:redis:${name}`;
+/** Redis passwords travel in an export's `databases` secrets under this prefix (DB names have no ':'). */
+const REDIS_EXPORT_PREFIX = 'redis:';
 
 function cleanServer(raw: unknown): QADbServer | undefined {
   const d = (raw ?? {}) as Partial<QADbServer>;
@@ -113,6 +124,35 @@ function cleanDatabases(raw: unknown): QADatabase[] {
       ...(service ? { service: service.slice(0, 100) } : {}),
       database,
       ...(host ? { host, ...(Number.isInteger(port) && port > 0 && port < 65_536 ? { port } : {}), ...(d.user ? { user: String(d.user).trim().slice(0, 100) } : {}), ...(d.ssl ? { ssl: true } : {}) } : {}),
+    });
+  }
+  return out;
+}
+
+function cleanRedis(raw: unknown): QARedis[] {
+  const out: QARedis[] = [];
+  for (const item of Array.isArray(raw) ? raw.slice(0, MAX_REDIS) : []) {
+    const r = (item ?? {}) as Partial<QARedis>;
+    const service = String(r.service ?? '').trim();
+    const name = String(r.name ?? '').trim() || service;
+    const host = String(r.host ?? '').trim();
+    if (!name && !host) continue;
+    if (!DB_NAME.test(name)) throw new QaInputError(`Nama Redis "${name}" tidak valid (huruf, angka, titik, - atau _).`);
+    if (out.some((x) => x.name.toLowerCase() === name.toLowerCase())) throw new QaInputError(`Redis "${name}" dipetakan dua kali.`);
+    if (!host || !/^[\w.-]{1,253}$/.test(host)) throw new QaInputError(`Redis ${name}: host tidak valid.`);
+    const port = Number(r.port) || 6379;
+    if (!Number.isInteger(port) || port < 1 || port > 65_535) throw new QaInputError(`Redis ${name}: port tidak valid.`);
+    const db = Number(r.db) || 0;
+    if (!Number.isInteger(db) || db < 0 || db > 15) throw new QaInputError(`Redis ${name}: nomor db harus 0–15.`);
+    const user = String(r.user ?? '').trim();
+    out.push({
+      name,
+      ...(service ? { service: service.slice(0, 100) } : {}),
+      host,
+      port,
+      ...(db ? { db } : {}),
+      ...(user ? { user: user.slice(0, 100) } : {}),
+      ...(r.tls ? { tls: true } : {}),
     });
   }
   return out;
@@ -162,6 +202,7 @@ export function validateEnvironment(raw: Partial<QAEnvironment>): QAEnvironment 
     ...(raw.dbWrites === true && raw.readOnly !== true ? { dbWrites: true } : {}),
     dbServer: cleanServer(raw.dbServer),
     databases: cleanDatabases(raw.databases),
+    ...(cleanRedis(raw.redis).length ? { redis: cleanRedis(raw.redis) } : {}),
     timeoutMs: Number.isFinite(timeoutMs) ? Math.min(Math.max(timeoutMs, 1_000), 300_000) : 30_000,
     // The version it was loaded with: a save over someone else's newer one is refused.
     ...(Number.isInteger(raw.version) && Number(raw.version) >= 0 ? { version: Number(raw.version) } : {}),
@@ -270,6 +311,7 @@ export class QaManager {
         secretVariableNames: Object.keys(await this.secretVariables(e.id)),
         dbServerPassword: Boolean(await this.deps.readSecret(serverSecretKey(e.id))),
         dbPasswords: Object.fromEntries(await Promise.all((e.databases ?? []).filter((d) => d.host).map(async (d) => [d.name, Boolean(await this.deps.readSecret(dbSecretKey(e.id, d.name)))] as const))),
+        ...(e.redis?.length ? { redisPasswords: Object.fromEntries(await Promise.all(e.redis.map(async (r) => [r.name, Boolean(await this.deps.readSecret(redisSecretKey(e.id, r.name)))] as const))) } : {}),
       })),
     );
   }
@@ -287,7 +329,7 @@ export class QaManager {
    * `secret`: undefined keeps the stored one, '' removes it. `secretVariables`: undefined keeps
    * them; an object replaces them, where an empty value keeps that variable's stored value.
    */
-  async saveEnvironment(raw: Partial<QAEnvironment>, secret?: string, secretVariables?: Record<string, string>, dbPasswords?: Record<string, string>, dbServerPassword?: string): Promise<QAEnvironment[]> {
+  async saveEnvironment(raw: Partial<QAEnvironment>, secret?: string, secretVariables?: Record<string, string>, dbPasswords?: Record<string, string>, dbServerPassword?: string, redisPasswords?: Record<string, string>): Promise<QAEnvironment[]> {
     const env = validateEnvironment(raw);
     const envs = await this.store.listEnvironments();
     const index = env.id ? envs.findIndex((e) => e.id === env.id) : -1;
@@ -310,6 +352,15 @@ export class QaManager {
     }
     for (const old of index >= 0 ? (envs[index].databases ?? []) : []) {
       if (!env.databases?.some((d) => d.name === old.name)) await this.deps.deleteSecret(dbSecretKey(env.id, old.name));
+    }
+    // Redis passwords: same rules as the databases'.
+    for (const [name, value] of Object.entries(redisPasswords ?? {})) {
+      if (!env.redis?.some((r) => r.name === name) || typeof value !== 'string') continue;
+      if (value === '') await this.deps.deleteSecret(redisSecretKey(env.id, name));
+      else if (!(await this.deps.writeSecret(redisSecretKey(env.id, name), value))) throw new QaInputError('Gagal menyimpan password Redis ke Keychain.');
+    }
+    for (const old of index >= 0 ? (envs[index].redis ?? []) : []) {
+      if (!env.redis?.some((r) => r.name === old.name)) await this.deps.deleteSecret(redisSecretKey(env.id, old.name));
     }
     if (secret !== undefined) {
       if (secret === '') await this.deps.deleteSecret(env.id);
@@ -337,6 +388,10 @@ export class QaManager {
     for (const d of env.databases ?? []) {
       const v = await this.deps.readSecret(dbSecretKey(env.id, d.name));
       if (v) databases[d.name] = v;
+    }
+    for (const r of env.redis ?? []) {
+      const v = await this.deps.readSecret(redisSecretKey(env.id, r.name));
+      if (v) databases[`${REDIS_EXPORT_PREFIX}${r.name}`] = v;
     }
     return {
       ...(token ? { token } : {}),
@@ -422,7 +477,8 @@ export class QaManager {
       if (action === 'new') for (let n = 2; taken.has(name.toLowerCase()); n++) name = `${String(e.name).trim()} (${n})`;
       const target = action === 'replace' && match ? { id: match.id, version: match.version } : { id: '', version: undefined };
       const s = secrets?.[e.id];
-      const saved = await this.saveEnvironment({ ...e, name, ...target }, s?.token, s?.variables, s?.databases, s?.dbServer);
+      const split = (redis: boolean) => (s?.databases ? Object.fromEntries(Object.entries(s.databases).filter(([k]) => k.startsWith(REDIS_EXPORT_PREFIX) === redis).map(([k, v]) => [redis ? k.slice(REDIS_EXPORT_PREFIX.length) : k, v])) : undefined);
+      const saved = await this.saveEnvironment({ ...e, name, ...target }, s?.token, s?.variables, split(false), s?.dbServer, split(true));
       existing.splice(0, existing.length, ...saved);
       imported++;
     }
@@ -471,6 +527,35 @@ export class QaManager {
     };
   }
 
+  /** Redis by name or service (case-insensitive). */
+  private findRedis(env: QAEnvironment, name: string): QARedis | undefined {
+    const n = name.toLowerCase();
+    return env.redis?.find((r) => r.name.toLowerCase() === n) ?? env.redis?.find((r) => r.service?.toLowerCase() === n);
+  }
+
+  /** A step's Redis key deletion: same gate as `dbExecute` (`dbWrites`, not read-only). */
+  private redisDel(env: QAEnvironment): ((name: string, keys: string[]) => Promise<number>) | undefined {
+    if (!env.dbWrites || env.readOnly || !env.redis?.length) return undefined;
+    const redis = this.deps.redis ?? REAL_REDIS;
+    return async (name, keys) => {
+      const r = this.findRedis(env, name);
+      if (!r) throw new QaDbError(`Redis "${name}" tidak ada di environment ${env.name}.`);
+      return redis.del(r, (await this.deps.readSecret(redisSecretKey(env.id, r.name))) ?? undefined, keys);
+    };
+  }
+
+  /** "Tes koneksi" of one Redis. */
+  async testRedisConnection(envId: string, name: string): Promise<string> {
+    const env = await this.savedEnv(envId);
+    const r = this.findRedis(env, name);
+    if (!r) throw new QaInputError('Redis tidak ditemukan; simpan environment dulu.');
+    try {
+      return await (this.deps.redis ?? REAL_REDIS).test(r, (await this.deps.readSecret(redisSecretKey(env.id, r.name))) ?? undefined);
+    } catch (e) {
+      throw new QaInputError((e as Error).message);
+    }
+  }
+
   private async savedEnv(envId: string): Promise<QAEnvironment> {
     const env = (await this.store.listEnvironments()).find((e) => e.id === envId);
     if (!env) throw new QaInputError('Environment tidak ditemukan; simpan dulu.');
@@ -507,6 +592,7 @@ export class QaManager {
   async deleteEnvironment(id: string): Promise<QAEnvironment[]> {
     const envs = await this.store.listEnvironments();
     for (const d of envs.find((e) => e.id === id)?.databases ?? []) await this.deps.deleteSecret(dbSecretKey(id, d.name));
+    for (const r of envs.find((e) => e.id === id)?.redis ?? []) await this.deps.deleteSecret(redisSecretKey(id, r.name));
     await this.deps.deleteSecret(serverSecretKey(id));
     await this.store.deleteEnvironment(id);
     await this.deps.deleteSecret(id);
@@ -666,7 +752,7 @@ export class QaManager {
    */
   private async prepareContext(req: QAGenerateRequest, progress: (text: string) => void): Promise<{ req: QAGenerateRequest; codebase?: { root: string; folders: string[] }; warning?: string }> {
     // The environment's databases: their schema lets the AI write real-data queries (never passwords).
-    req = { ...req, databases: undefined };
+    req = { ...req, databases: undefined, redis: undefined };
     const env = req.environmentId ? (await this.store.listEnvironments()).find((e) => e.id === req.environmentId) : undefined;
     if (env?.databases?.length) {
       // Only the databases of the selected tasks' services (a project has many microservices).
@@ -688,6 +774,11 @@ export class QaManager {
         // Agents may then write a step's `setup` (data changes for the scenario).
         if (env.dbWrites && !env.readOnly) req.dbWrites = true;
       }
+    }
+    // Agents may write a step's `redisDel` for the environment's Redis (names only, never passwords).
+    if (env?.redis?.length && env.dbWrites && !env.readOnly) {
+      req.dbWrites = true;
+      req.redis = env.redis.map((r) => ({ name: r.name, ...(r.service ? { service: r.service } : {}) }));
     }
     // The codebase (read-only): routes, payloads and responses are checked against the code.
     let codebase: { root: string; folders: string[] } | undefined;
@@ -1060,7 +1151,7 @@ export class QaManager {
           const services = [...new Set(flow.steps.map((st) => st.service).filter((x): x is string => Boolean(x)))];
           // Same environment as the failed run: its databases let the repair use real test data.
           const { req: ctx, codebase } = await this.prepareContext({ ...(plan?.request ?? { projectId, projectName: suite.projectName, categories: [] }), ai, tasks: services.map((sv) => ({ title: '', service: sv, spec: '' })), environmentId: run.environment.id }, (t) => (job.progress = t));
-          const reply = await this.runAgent(job, suite.projectName, ai, buildRepairPrompt(flow, result, codebase, ctx.databases, ctx.dbWrites), REPAIR_SYSTEM_PROMPT, codebase ? [codebase.root] : []);
+          const reply = await this.runAgent(job, suite.projectName, ai, buildRepairPrompt(flow, result, codebase, ctx.databases, ctx.dbWrites, ctx.redis), REPAIR_SYSTEM_PROMPT, codebase ? [codebase.root] : []);
           let verdict: ReturnType<typeof parseRepair>;
           try {
             verdict = parseRepair(reply, flow);
@@ -1145,7 +1236,7 @@ export class QaManager {
           const services = [...new Set(batch.flatMap((f) => f.steps.map((st) => st.service).filter((x): x is string => Boolean(x))))];
           // The environment's databases of these services: the agent can swap sample values for real data.
           const { req: ctx, codebase } = await this.prepareContext({ ...(plan?.request ?? { projectId, projectName: suite.projectName, categories: [] }), ai, tasks: services.map((sv) => ({ title: '', service: sv, spec: '' })), environmentId: opts.environmentId }, (t) => (job.progress = t));
-          const reply = await this.runAgent(job, suite.projectName, ai, buildFixPrompt(batch, instruction, results, codebase, ctx.databases, ctx.dbWrites), FIX_SYSTEM_PROMPT, codebase ? [codebase.root] : []);
+          const reply = await this.runAgent(job, suite.projectName, ai, buildFixPrompt(batch, instruction, results, codebase, ctx.databases, ctx.dbWrites, ctx.redis), FIX_SYSTEM_PROMPT, codebase ? [codebase.root] : []);
           let fix: ReturnType<typeof parseFix>;
           try {
             fix = parseFix(reply, batch);
@@ -1246,6 +1337,7 @@ export class QaManager {
           fetch: this.deps.fetch,
           query: env.databases?.length ? this.dbQuery(env) : undefined,
           execute: this.dbExecute(env),
+          redisDel: this.redisDel(env),
           carried,
           declared,
           cancelled: () => state.cancelled,

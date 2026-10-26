@@ -45,10 +45,11 @@ export const qa = {
   upsertProject: (project: { id: string; name: string; tads: QATadRef[] }) => post<{ project: QAProject }>('/projects', { project }).then((r) => r.project),
   environments: () => call<QAEnvironment[]>('/environments'),
   /** `secret`: undefined keeps the stored token, '' removes it. `secretVariables`: undefined keeps them. */
-  saveEnvironment: (environment: QAEnvironment, secret?: string, secretVariables?: Record<string, string>, dbPasswords?: Record<string, string>, dbServerPassword?: string) =>
-    post<QAEnvironment[]>('/environments', { environment, secret, secretVariables, dbPasswords, dbServerPassword }),
+  saveEnvironment: (environment: QAEnvironment, secret?: string, secretVariables?: Record<string, string>, dbPasswords?: Record<string, string>, dbServerPassword?: string, redisPasswords?: Record<string, string>) =>
+    post<QAEnvironment[]>('/environments', { environment, secret, secretVariables, dbPasswords, dbServerPassword, redisPasswords }),
   /** Connects (read-only) to the environment's database server, or one mapped database, and returns the server version. */
   testDatabase: (environmentId: string, name?: string) => post<{ version: string }>('/db/test', { environmentId, name }).then((r) => r.version),
+  testRedis: (environmentId: string, name: string) => post<{ version: string }>('/redis/test', { environmentId, name }).then((r) => r.version),
   /** Database names on the environment's server. */
   listDatabases: (environmentId: string) => post<{ databases: string[] }>('/db/list', { environmentId }).then((r) => r.databases),
   deleteEnvironment: (id: string) => post<QAEnvironment[]>('/environments/delete', { id }),

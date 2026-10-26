@@ -1142,10 +1142,14 @@ async function handleQa(route: string, url: URL, req: IncomingMessage, res: Serv
     }
     if (route === 'GET /qa/environments') return send(res, 200, await qa.listEnvironments());
     if (route === 'POST /qa/environments') {
-      const body = await readJson<{ environment: Partial<QAEnvironment>; secret?: string; secretVariables?: Record<string, string>; dbPasswords?: Record<string, string>; dbServerPassword?: string }>(req, 512 * 1024);
+      const body = await readJson<{ environment: Partial<QAEnvironment>; secret?: string; secretVariables?: Record<string, string>; dbPasswords?: Record<string, string>; dbServerPassword?: string; redisPasswords?: Record<string, string> }>(req, 512 * 1024);
       if (body.secret !== undefined && typeof body.secret !== 'string') throw new QaInputError('Token harus berupa teks.');
       if (body.dbServerPassword !== undefined && typeof body.dbServerPassword !== 'string') throw new QaInputError('Password harus berupa teks.');
-      return send(res, 200, await qa.saveEnvironment(body.environment ?? {}, body.secret, body.secretVariables, body.dbPasswords, body.dbServerPassword));
+      return send(res, 200, await qa.saveEnvironment(body.environment ?? {}, body.secret, body.secretVariables, body.dbPasswords, body.dbServerPassword, body.redisPasswords));
+    }
+    if (route === 'POST /qa/redis/test') {
+      const body = await readJson<{ environmentId?: string; name?: string }>(req, 16 * 1024);
+      return send(res, 200, { version: await qa.testRedisConnection(String(body.environmentId ?? ''), String(body.name ?? '')) });
     }
     if (route === 'POST /qa/db/test') {
       const body = await readJson<{ environmentId?: string; name?: string }>(req, 16 * 1024);
@@ -1266,15 +1270,17 @@ async function handleQa(route: string, url: URL, req: IncomingMessage, res: Serv
     if (route === 'POST /qa/runs') {
       const body = await readJson<QARunRequest>(req, 256 * 1024);
       const run = await qa.startRun(body);
-      // Data changes in the databases (steps' setup) are mutations too: named in the audit entry.
+      // Data changes in the databases (steps' setup) and Redis key deletions are mutations too: named in the audit entry.
       const suite = await qa.getSuite(run.projectId).catch(() => null);
-      const setups = (suite?.flows ?? []).filter((f) => run.flows.some((r) => r.flowId === f.id)).flatMap((f) => f.steps.flatMap((s) => s.setup ?? []));
+      const picked = (suite?.flows ?? []).filter((f) => run.flows.some((r) => r.flowId === f.id));
+      const setups = picked.flatMap((f) => f.steps.flatMap((s) => s.setup ?? []));
+      const redisDels = picked.flatMap((f) => f.steps.flatMap((s) => s.redisDel ?? []));
       await audit({
         ts: new Date().toISOString(),
         action: 'qa.run',
         result: 'success',
         spaceKey: run.environment.name,
-        title: `${run.projectName} (${run.flows.length} flow${setups.length ? `, ${setups.length} ubah data DB: ${[...new Set(setups.map((s) => s.db))].join(', ')}` : ''})`.slice(0, 300),
+        title: `${run.projectName} (${run.flows.length} flow${setups.length ? `, ${setups.length} ubah data DB: ${[...new Set(setups.map((s) => s.db))].join(', ')}` : ''}${redisDels.length ? `, ${redisDels.length} hapus key Redis: ${[...new Set(redisDels.map((s) => s.redis))].join(', ')}` : ''})`.slice(0, 300),
         attachments: 0,
       }).catch(() => {});
       return send(res, 202, run);

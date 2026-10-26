@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type { QAFlow, QAFlowResult, QAGenerateRequest, QAPlan, QAPlanEndpoint, QAPlanStage } from '../../src/lib/qa/types.ts';
-import { databaseSection, DB_SCHEMA_EXAMPLE, extractJson, normalizeEditedFlow } from './generator.ts';
+import { databaseSection, DB_SCHEMA_EXAMPLE, extractJson, normalizeEditedFlow, redisSection } from './generator.ts';
 
 /**
  * The E2E pipeline's other agents: the planner (journey map from the TAD and the code, reviewed
@@ -185,7 +185,7 @@ const dbRules = (dbs: Databases) =>
       ]
     : [];
 
-export function buildRepairPrompt(flow: QAFlow, result: QAFlowResult, codebase?: { root: string }, databases: Databases = [], dbWrites = false): string {
+export function buildRepairPrompt(flow: QAFlow, result: QAFlowResult, codebase?: { root: string }, databases: Databases = [], dbWrites = false, redis?: QAGenerateRequest['redis']): string {
   const steps = result.steps.map((s, i) => ({
     no: i + 1,
     name: s.name,
@@ -205,6 +205,7 @@ export function buildRepairPrompt(flow: QAFlow, result: QAFlowResult, codebase?:
     'Tipe field request mengikuti struct: variabel ditulis "{{nama|string}}", "{{nama|number}}", atau "{{nama|boolean}}" (string berisi angka seperti nomor HP/rekening/kode WAJIB "|string").',
     ...dbRules(databases),
     databases.length ? `- Data uji yang tidak ada/kedaluwarsa (verdict "environment") bisa diatasi dengan "dataQueries" yang memilih data yang cocok${dbWrites ? ', atau dengan "setup" di step bila kondisinya tidak bisa dibuat lewat API (mis. promo yang belum mulai)' : ''}.` : '',
+    redis?.length ? '- Response memakai data lama padahal step sebelumnya sudah mengubahnya (cache)? Tambahkan "redisDel" di step itu untuk key cache yang dibaca kodenya.' : '',
     '',
     'Format jawaban (JSON):',
     '{"verdict":"fix-test|service-bug|environment","reason":"penjelasan singkat","flow":{...flow lengkap bila diperbaiki...},"bug":{"title":"...","detail":"...","service":"..."}}',
@@ -216,6 +217,7 @@ export function buildRepairPrompt(flow: QAFlow, result: QAFlowResult, codebase?:
     '## Hasil run',
     JSON.stringify(steps, null, 2).slice(0, 20_000),
     databaseSection(databases, dbWrites),
+    redisSection(redis),
   ]
     .filter((l, i, all) => l !== '' || all[i - 1] !== '')
     .join('\n');
@@ -264,7 +266,7 @@ function resultBrief(result: QAFlowResult | undefined) {
   };
 }
 
-export function buildFixPrompt(flows: QAFlow[], instruction: string, results: Map<string, QAFlowResult>, codebase?: { root: string }, databases: Databases = [], dbWrites = false): string {
+export function buildFixPrompt(flows: QAFlow[], instruction: string, results: Map<string, QAFlowResult>, codebase?: { root: string }, databases: Databases = [], dbWrites = false, redis?: QAGenerateRequest['redis']): string {
   return [
     'Perbaiki test case E2E berikut sesuai instruksi Tech Lead. Ubah HANYA yang perlu; test case yang tidak terkena instruksi kembalikan apa adanya.',
     '',
@@ -291,6 +293,7 @@ export function buildFixPrompt(flows: QAFlow[], instruction: string, results: Ma
       ? ['', '## Hasil run terakhir (bila ada)', JSON.stringify(Object.fromEntries(flows.filter((f) => results.has(f.id)).map((f) => [f.id, resultBrief(results.get(f.id))])), null, 2).slice(0, 25_000)]
       : []),
     ...(databases.length ? ['', DB_SCHEMA_EXAMPLE, databaseSection(databases, dbWrites)] : []),
+    ...(redis?.length ? [redisSection(redis)] : []),
   ].join('\n');
 }
 
